@@ -1,0 +1,32 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.1.2
+Date: 2026-11-09
+  Features:
+    - Transformer panel organised in sections (power arriving, network it feeds, this transformer), with an explanatory tooltip on every line.
+    - Legends: in the grid power panel, and a legend window for the heatmap and the power-lost-per-pole view.
+    - Grid diagram hides routes that carry no power (the grey lines) by default; the per-player setting "Grid diagram: show idle routes" draws them again.
+---------------------------------------------------------------------------------------------------
+Version: 0.1.1
+Date: 2026-11-09
+  Graphics:
+    - Added a mod thumbnail.
+---------------------------------------------------------------------------------------------------
+Version: 0.1.0
+Date: 2026-11-09
+  Features:
+    - First release, split out of a Power Overload fork as an add-on mod.
+    - Distance-based line losses between transformers, weighted by pole type (resistance from each pole's power rating).
+    - Line loss capped at 95% per route; a source pays the flow-weighted average of its routes.
+    - Transformers fed directly by generators pay for the wires to them, weighted by each generator's rated output, burned by a "Line loss" consumer on the generator network. Several transformers drawing from the same generators are paired with them by the same balancing as "feed nearest consumers first".
+    - Losses are burned by hidden "Line loss" (output network) and "Transf. ineff." (input network) consumers, visible in the electric network statistics.
+    - Own transformer efficiency setting (default 99%); Power Overload's efficiency should be set to 100%.
+    - Opt-in "weight machines by their live load": poles weighted by the machines in their supply area and what each machine type draws right now.
+    - Transformer core loss (default 0.1% of its rating, while switched on). A transformer is rated by the weaker of its two sides: the highest-rated pole wired to each side, and the smaller of the two.
+    - Hovering a transformer shows the power it draws and the line loss of the power arriving at it.
+    - Panel next to an opened transformer: upstream and downstream line loss, transformer inefficiency, power drawn and output.
+    - "Feed nearest consumers first" sharing (on by default); machines are split by pole ownership (each pole charged to its electrically nearest transformer), so feeding a network from several sides cuts the loss of its machines between transformers on the same network.
+    - "Line resistance" row in power pole tooltips.
+    - Grid diagram on the map (shortcut), with an energy-balance panel and the routes losing the most power (button opens the map there).
+    - "Power lost per pole" map view (shortcut): dots sized and coloured by the watts lost delivering each pole's machine load.
+    - Pole heatmap on the map (shortcut): each pole coloured by the line loss of the power reaching it.
+    - Distance searches re-run only when a network changes (pole built or removed, networks merged or split, transformer added or removed), plus a slow background pass.

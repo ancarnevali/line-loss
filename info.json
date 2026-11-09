@@ -1,0 +1,12 @@
+{
+  "name": "line-loss",
+  "version": "0.1.2",
+  "title": "Line loss",
+  "author": "Antonio Carnevali",
+  "description": "Add-on for Power Overload. Power is lost along the wires between transformers, depending on distance and pole type.",
+  "factorio_version": "2.1",
+  "dependencies": [
+    "base >= 2.1.0",
+    "PowerOverload >= 2.3.3"
+  ]
+}
