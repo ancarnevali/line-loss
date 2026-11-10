@@ -1,4 +1,23 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.1.3
+Date: 2026-11-10
+  Features:
+    - Cumulative line loss in the transformer panel, under the last segment: the line losses of every segment between the generators and that transformer, compounded, 1 - (1 - L1) x (1 - L2) x ...; transformer inefficiency and core loss are not counted. Every line's tooltip now defines the value.
+    - Hovering a transformer shows Drawing and Line loss (of the last segment), coloured with the same thresholds as the grid diagram's diamonds.
+  Changes:
+    - Machine load is spread only over the poles that can power machines: huge poles and fuses have no supply area, so they carry power without diluting the average.
+    - The heatmap and "power lost per pole" views are merged into one "line-loss map" shortcut: dot colour = line loss of the power reaching the pole, dot size = power lost delivering its machine load. A key bound to the heatmap keeps working; one bound to "power lost per pole" has to be bound again.
+    - Removed the legends: the legend window of the map views, and the legend in the grid power panel.
+    - Transformer panel: sections renamed Upstream and Downstream, "Transformer inefficiency" shortened to "Inefficiency", output shown without the after-line-loss figure (already in the downstream line); upstream and downstream used throughout the panel tooltips, settings descriptions and documentation.
+    - The transformer panel no longer shows distances; the worst-routes list keeps them, with a tooltip explaining that they are resistance-weighted (tiles of big-pole wire).
+    - Power Overload's high- and low-priority transformers are hidden (recipes removed and locked); ones already built keep working. Their priority does not fit how this mod splits a network's supply between transformers.
+  Optimizations:
+    - Wire searches read each pole's name once and look up its resistance, type and supply area per prototype, instead of asking the game several times per pole.
+    - The text under a hovered transformer is recomputed when the selection changes and twice a second, not every tick.
+    - Less work per tick while building: networks waiting for a new search are matched against stored network ids.
+  Bugfixes:
+    - A transformer feeding routes of very different lengths was charged too little: it averaged the routes' losses before converting them to power lost. It is now charged exactly the sum of each route's loss, P x L / (1 - L), so the grid diagram's routes add up to the burn. The downstream line loss shown is that total as a share of the output.
+---------------------------------------------------------------------------------------------------
 Version: 0.1.2
 Date: 2026-11-09
   Features:
@@ -17,8 +36,8 @@ Date: 2026-11-09
     - First release, split out of a Power Overload fork as an add-on mod.
     - Distance-based line losses between transformers, weighted by pole type (resistance from each pole's power rating).
     - Line loss capped at 95% per route; a source pays the flow-weighted average of its routes.
-    - Transformers fed directly by generators pay for the wires to them, weighted by each generator's rated output, burned by a "Line loss" consumer on the generator network. Several transformers drawing from the same generators are paired with them by the same balancing as "feed nearest consumers first".
-    - Losses are burned by hidden "Line loss" (output network) and "Transf. ineff." (input network) consumers, visible in the electric network statistics.
+    - Transformers fed directly by generators pay for the wires to them, weighted by each generator's rated output, drawn by a "Line loss" consumer on the generator network. Several transformers drawing from the same generators are paired with them by the same balancing as "feed nearest consumers first".
+    - Losses are drawn by hidden "Line loss" (downstream network) and "Transf. ineff." (upstream network) consumers, visible in the electric network statistics.
     - Own transformer efficiency setting (default 99%); Power Overload's efficiency should be set to 100%.
     - Opt-in "weight machines by their live load": poles weighted by the machines in their supply area and what each machine type draws right now.
     - Transformer core loss (default 0.1% of its rating, while switched on). A transformer is rated by the weaker of its two sides: the highest-rated pole wired to each side, and the smaller of the two.

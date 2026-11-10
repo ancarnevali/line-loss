@@ -21,3 +21,38 @@ for prototype_name, prototype in pairs(data.raw["electric-pole"]) do
     end
   end
 end
+
+-- Power Overload's high- and low-priority transformers are hidden: their
+-- output priority makes them supply first or last, while this mod splits a
+-- network's supply among its transformers as if they shared the load. Their
+-- recipes are taken out of the technologies and disabled; transformers already
+-- built keep working.
+local PRIORITY_TRANSFORMERS = {["po-transformer-high"] = true, ["po-transformer-low"] = true}
+
+for _, technology in pairs(data.raw.technology) do
+  local effects = technology.effects
+  if effects then
+    for i = #effects, 1, -1 do
+      local effect = effects[i]
+      if effect.type == "unlock-recipe" and PRIORITY_TRANSFORMERS[effect.recipe] then
+        table.remove(effects, i)
+      end
+    end
+  end
+end
+
+for name in pairs(PRIORITY_TRANSFORMERS) do
+  local recipe = data.raw.recipe[name]
+  if recipe then
+    recipe.enabled = false
+    recipe.hidden = true
+  end
+  local item = data.raw.item[name]
+  if item then
+    item.hidden = true
+  end
+  local entity = data.raw["electric-pole"][name] or data.raw["power-switch"][name]
+  if entity then
+    entity.hidden_in_factoriopedia = true
+  end
+end

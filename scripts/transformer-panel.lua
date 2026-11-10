@@ -1,17 +1,16 @@
 -- Panel next to an opened transformer (attached to the power switch window,
 -- like Power Overload's own transformer panel):
---   Incoming: line loss of the power arriving at it, and its distance
---   Outgoing: line loss on its output network, distance, and power burned
---   Transformer inefficiency: power burned on its input network
---   Core loss: constant loss from the transformer's rating
---   Drawing / Output
+--   Upstream: line loss of the last segment, and the same
+--     compounded from the generators down (cumulative)
+--   Downstream: downstream line loss and power lost
+--   This transformer: inefficiency and core loss (both charged on the
+--     upstream network), drawing, output
 -- Refreshed every UPDATE_INTERVAL ticks while open.
 
 local FRAME_NAME = "line-loss-transformer-panel"
 local UPDATE_INTERVAL = 30
 
 local function percent(x) return string.format("%.1f", x * 100) end
-local function tiles(d) return string.format("%d", math.floor(d + 0.5)) end
 
 ---@param player LuaPlayer
 local function close_panel(player)
@@ -42,20 +41,24 @@ local function fill(frame, entity)
   local s = storage.settings
 
   if s.enabled then
-    -- Power arriving
+    -- Upstream
     header(content, {"line-loss-panel.section-in"})
-    local loss_in, d_in = get_upstream_line_loss(entity.unit_number)
+    local loss_in = get_upstream_line_loss(entity.unit_number)
     if loss_in and (parts.gen_burn or 0) > 0 then
-      row(content, {"line-loss-panel.incoming-gen", percent(loss_in), tiles(d_in), format(parts.gen_burn)}, {"line-loss-panel.incoming-gen-tooltip"})
+      row(content, {"line-loss-panel.incoming-gen", percent(loss_in), format(parts.gen_burn)}, {"line-loss-panel.incoming-gen-tooltip"})
     elseif loss_in then
-      row(content, {"line-loss-panel.incoming", percent(loss_in), tiles(d_in)}, {"line-loss-panel.incoming-tooltip"})
+      row(content, {"line-loss-panel.incoming", percent(loss_in)}, {"line-loss-panel.incoming-tooltip"})
     else
       row(content, {"line-loss-panel.incoming-none"}, {"line-loss-panel.incoming-tooltip"})
     end
-    -- Network it feeds
+    local total_in = get_cumulative_line_loss(entity.unit_number)
+    if total_in then
+      row(content, {"line-loss-panel.cumulative", percent(total_in)}, {"line-loss-panel.cumulative-tooltip"})
+    end
+    -- Downstream
     header(content, {"line-loss-panel.section-out"})
     if parts.line_distance then
-      row(content, {"line-loss-panel.outgoing", percent(parts.line_loss or 0), tiles(parts.line_distance), format(parts.line_burn or 0)},
+      row(content, {"line-loss-panel.outgoing", percent(parts.line_loss or 0), format(parts.line_burn or 0)},
         {"line-loss-panel.outgoing-tooltip"})
     else
       row(content, {"line-loss-panel.calculating"}, {"line-loss-panel.outgoing-tooltip"})
@@ -71,7 +74,7 @@ local function fill(frame, entity)
       {"line-loss-panel.no-load-tooltip"})
   end
   row(content, {"line-loss-panel.drawing", format(parts.p_draw or 0)}, {"line-loss-panel.drawing-tooltip"})
-  row(content, {"line-loss-panel.output", format(parts.p_out or 0), format(parts.p_deliv or 0)}, {"line-loss-panel.output-tooltip"})
+  row(content, {"line-loss-panel.output", format(parts.p_out or 0)}, {"line-loss-panel.output-tooltip"})
 end
 
 ---@param player LuaPlayer

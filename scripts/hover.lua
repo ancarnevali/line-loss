@@ -1,15 +1,21 @@
 -- Text under a hovered transformer, two lines in one colour:
---   Drawing: <power drawn from the input network>
---   Line loss: <loss of the power arriving at it>%
--- Coloured by that line loss: green below 10%, yellow below 50%, red above.
+--   Drawing: <power drawn from the upstream network>
+--   Line loss: <upstream line loss of the last segment>%
+-- Coloured by that last-segment line loss, with the same thresholds as the
+-- grid diagram's diamonds: green below 10%, yellow below 50%, red above.
+-- The cumulative line loss is in the transformer panel only.
 -- Two text objects that keep the same size on screen at every zoom level,
--- like Power Overload's pole readout (rendered text does not break lines).
+-- like Power Overload's pole readout.
 -- Both hang off the same anchor point: the first line sits on it
 -- (vertical alignment "bottom"), the second hangs under it ("top"). An offset
 -- in tiles would change the gap between them with zoom; a shared anchor
 -- keeps it constant on screen.
 
--- Anchor between the two lines, in tiles below the transformer's centre
+-- Recomputed when the selection changes, and otherwise only this often (the
+-- figures themselves change once a second)
+local REFRESH_INTERVAL = 30
+
+-- Anchor between the two text objects, in tiles below the transformer's centre
 -- (its bottom edge is at 1)
 local ANCHOR_Y = 1.3
 
@@ -54,6 +60,7 @@ local function transformer_info(transformer)
   -- nil: not fed through another transformer (e.g. straight from generators),
   -- so no line loss is modelled upstream of it
   local loss = get_upstream_line_loss(transformer.unit_number) or 0
+  -- Same thresholds as the grid diagram's diamonds (grid-diagram.lua band_for)
   local colour_key = "ok"
   if loss >= 0.5 then
     colour_key = "over"
@@ -62,7 +69,8 @@ local function transformer_info(transformer)
   end
   local value = string.format("%.1f", loss * 100)
   local drawing = shared.format_energy_number(parts.p_draw or 0)
-  return {"line-loss.drawing-hover", drawing}, {"line-loss.line-loss-hover", value},
+  return {"line-loss.drawing-hover", drawing},
+    {"line-loss.line-loss-hover", value},
     drawing .. "|" .. value, colour_key
 end
 
@@ -86,66 +94,93 @@ function reset_hover()
     destroy(info.id2)
   end
   storage.hover_info = {}
+  storage.hover_selected = {}
   hover_cache = {}
+end
+
+---@param player LuaPlayer
+---@param selected LuaEntity
+local function refresh_player(player, selected)
+  local infos = storage.hover_info
+  local player_index = player.index
+  local transformer
+  if selected.force == player.force then
+    local name = selected.name
+    if HIDDEN_TRANSFORMER_POLES[name] then
+      transformer = transformer_of_hidden_pole(player_index, selected)
+    elseif TRANSFORMER_NAMES[name] then
+      transformer = selected
+    end
+  end
+  local line1, line2, key, colour_key
+  if transformer then line1, line2, key, colour_key = transformer_info(transformer) end
+
+  if not line1 then
+    clear_player_info(player_index)
+    return
+  end
+  local info = infos[player_index]
+  local object = info and rendering.get_object_by_id(info.id)
+  local object2 = info and info.id2 and rendering.get_object_by_id(info.id2)
+  if object and object.valid and object2 and object2.valid and info.unit_number == transformer.unit_number then
+    if info.key ~= key then
+      object.text = line1
+      object2.text = line2
+      info.key = key
+    end
+    if info.colour_key ~= colour_key then
+      object.color = COLOURS[colour_key]
+      object2.color = COLOURS[colour_key]
+      info.colour_key = colour_key
+    end
+  else
+    clear_player_info(player_index)
+    local function draw(text, vertical_alignment)
+      return rendering.draw_text{
+        text = text,
+        surface = transformer.surface,
+        target = {entity = transformer, offset = {x = 0, y = ANCHOR_Y}},
+        color = COLOURS[colour_key],
+        scale = 1.5 * player.display_scale,
+        alignment = "center",
+        vertical_alignment = vertical_alignment,
+        scale_with_zoom = true,
+        players = {player},
+      }.id
+    end
+    infos[player_index] = {
+      id = draw(line1, "bottom"),
+      id2 = draw(line2, "top"),
+      unit_number = transformer.unit_number,
+      key = key,
+      colour_key = colour_key,
+    }
+  end
 end
 
 ---@param tick GameTick
 function update_hover(tick)
-  local infos = storage.hover_info
+  -- player index -> unit number of what the player had selected last tick.
+  -- In storage: it decides when drawings change, so every client must agree.
+  local last = storage.hover_selected
+  if not last then
+    last = {}
+    storage.hover_selected = last
+  end
+  local periodic = tick % REFRESH_INTERVAL == 0
   for _, player in pairs(game.connected_players) do
     local player_index = player.index
     local selected = player.selected
-    local transformer
-    if selected and selected.force == player.force then
-      if HIDDEN_TRANSFORMER_POLES[selected.name] then
-        transformer = transformer_of_hidden_pole(player_index, selected)
-      elseif TRANSFORMER_NAMES[selected.name] then
-        transformer = selected
-      end
-    end
-    local line1, line2, key, colour_key
-    if transformer then line1, line2, key, colour_key = transformer_info(transformer) end
-
-    if not line1 then
-      clear_player_info(player_index)
-    else
-      local info = infos[player_index]
-      local object = info and rendering.get_object_by_id(info.id)
-      local object2 = info and info.id2 and rendering.get_object_by_id(info.id2)
-      if object and object.valid and object2 and object2.valid and info.unit_number == transformer.unit_number then
-        if info.key ~= key then
-          object.text = line1
-          object2.text = line2
-          info.key = key
-        end
-        if info.colour_key ~= colour_key then
-          object.color = COLOURS[colour_key]
-          object2.color = COLOURS[colour_key]
-          info.colour_key = colour_key
-        end
-      else
+    -- Transformers and their hidden poles all have a unit number
+    local unit = selected and selected.unit_number
+    if not unit then
+      if last[player_index] then
+        last[player_index] = nil
         clear_player_info(player_index)
-        local function draw(text, vertical_alignment)
-          return rendering.draw_text{
-            text = text,
-            surface = transformer.surface,
-            target = {entity = transformer, offset = {x = 0, y = ANCHOR_Y}},
-            color = COLOURS[colour_key],
-            scale = 1.5 * player.display_scale,
-            alignment = "center",
-            vertical_alignment = vertical_alignment,
-            scale_with_zoom = true,
-            players = {player},
-          }.id
-        end
-        infos[player_index] = {
-          id = draw(line1, "bottom"),
-          id2 = draw(line2, "top"),
-          unit_number = transformer.unit_number,
-          key = key,
-          colour_key = colour_key,
-        }
       end
+    elseif last[player_index] ~= unit or periodic then
+      last[player_index] = unit
+      refresh_player(player, selected)
     end
   end
 end

@@ -1,7 +1,12 @@
 -- Tracks Power Overload's transformers, measures the power each one moves,
--- and burns the losses in two hidden consumers per transformer:
---   "Line loss"      on the output network: loss * power delivered
---   "Transf. ineff." on the input network:  power drawn * (1 - e) / e
+-- and charges the losses through hidden consumers next to each transformer:
+--   "Line loss"      on the downstream network: delivered * L / (1 - L),
+--                    L = downstream line loss
+--   "Transf. ineff." on the upstream network: inefficiency
+--                    p_in * (1 - e) / e, plus the core loss (a share of the
+--                    rating, while switched on)
+--   "Line loss"      on the upstream network, when it is fed straight by
+--                    generators: drawn * L / (1 - L), L = generator line loss
 --
 -- Power Overload keeps its transformer data private, so this mod finds the
 -- transformer's hidden parts itself:
@@ -12,7 +17,7 @@
 -- Our consumers go on that hidden surface too, at the same positions, so they
 -- join the same networks without being visible or in the way.
 --
--- Power per transformer: every MEASURE_INTERVAL ticks, the output network's
+-- Power per transformer: every MEASURE_INTERVAL ticks, the downstream network's
 -- statistics give how much Power Overload's output interfaces produced. When
 -- several transformers feed the same network, that total is split by their
 -- buffer sizes, which Power Overload adapts to each transformer's throughput.
@@ -26,15 +31,15 @@
 ---@field pole_in LuaEntity?   Power Overload's hidden input pole
 ---@field pole_out LuaEntity?  Power Overload's hidden output pole
 ---@field interface_out LuaEntity?  Power Overload's hidden output interface
----@field line_eei LuaEntity?   "Line loss" consumer (output network)
----@field ineff_eei LuaEntity?  "Transf. ineff." consumer (input network)
----@field line_in_eei LuaEntity?  "Line loss" consumer on a generator input network
+---@field line_eei LuaEntity?   "Line loss" consumer (downstream network)
+---@field ineff_eei LuaEntity?  "Transf. ineff." consumer (upstream network)
+---@field line_in_eei LuaEntity?  "Line loss" consumer on the upstream network, when it is a generator network
 ---@field gen_loss number?  upstream line loss from generators (generator networks only)
 ---@field gen_burn number   power burned by line_in_eei (W)
----@field p_out number   power given to the output network, including the line loss (W)
+---@field p_out number   power given to the downstream network, including the line loss (W)
 ---@field p_deliv number power that reaches consumers after the line loss (W)
 ---@field p_in number    power Power Overload's input interface takes (W)
----@field p_draw number  total power drawn from the input network, p_in + ineff burn (W)
+---@field p_draw number  total power drawn from the upstream network: p_in + inefficiency + core loss (W)
 ---@field line_burn number
 ---@field ineff_burn number
 ---@field line_distance number?  load-weighted distance (line-losses.lua)
@@ -144,7 +149,17 @@ end
 ---@field transformers number
 
 local LOADS_TTL = 20
-local loads_cache = {}  -- network id -> {tick, loads}; a cache, rebuilt freely
+-- network id -> {tick, loads}. Kept in storage: a reading is reused for
+-- LOADS_TTL ticks, so a player joining a multiplayer game must receive the
+-- same readings the others hold instead of taking fresh ones.
+local function loads_cache_table()
+  local cache = storage.loads_cache
+  if not cache then
+    cache = {}
+    storage.loads_cache = cache
+  end
+  return cache
+end
 
 ---@param pole LuaEntity
 ---@param tick GameTick
@@ -152,6 +167,7 @@ local loads_cache = {}  -- network id -> {tick, loads}; a cache, rebuilt freely
 function get_network_loads(pole, tick)
   local network_id = pole.electric_network_id
   if not network_id then return {machines = 0, line = 0, ineff = 0, transformers = 0, by_name = {}} end
+  local loads_cache = loads_cache_table()
   local entry = loads_cache[network_id]
   if entry and tick - entry.tick < LOADS_TTL and tick >= entry.tick then return entry.loads end
 
@@ -189,6 +205,7 @@ function get_network_loads(pole, tick)
 end
 
 function purge_loads_cache(tick)
+  local loads_cache = loads_cache_table()
   for network_id, entry in pairs(loads_cache) do
     if tick - entry.tick > 600 or tick < entry.tick then loads_cache[network_id] = nil end
   end
@@ -289,7 +306,7 @@ local function refresh_parts(parts)
   if not (parts.pole_in and parts.pole_in.valid) then
     parts.pole_in = find_at(surface, HIDDEN_POLE_IN, parts.position_in)
     if parts.pole_in then
-      -- New consumer on its input network: the transformers feeding it
+      -- New consumer on its upstream network: the transformers feeding it
       invalidate_line_loss_inputs()
       mark_line_loss_network(parts.pole_in.electric_network_id)
     end
@@ -358,7 +375,7 @@ function check_po_efficiency_warning()
   storage.po_efficiency_warned = true
 end
 
--- Measurement and burning ------------------------------------------------------
+-- Measurement and losses --------------------------------------------------------
 
 ---@param tick GameTick
 function update_transformers(tick)
@@ -367,7 +384,7 @@ function update_transformers(tick)
   local refresh = tick % REFRESH_INTERVAL == 0
   check_po_efficiency_warning()
 
-  -- Group working transformers by output network and interface prototype
+  -- Group working transformers by downstream network and interface prototype
   local groups = {}  -- network id -> {pole, by_name = {name -> {total, list}}}
   for unit, parts in pairs(transformers) do
     local entity = parts.transformer
@@ -388,10 +405,9 @@ function update_transformers(tick)
       local in_net = pole_in and pole_in.valid and pole_in.electric_network_id or nil
       if in_net ~= parts.in_net then
         parts.in_net = in_net
-        mark_line_loss_dirty(unit)  -- its input network changed
+        mark_line_loss_dirty(unit)  -- its upstream network changed
       end
       local interface = parts.interface_out
-      local pole_out = parts.pole_out
       if entity.power_switch_state and interface and interface.valid and pole_out and pole_out.valid then
         local network_id = pole_out.electric_network_id
         if network_id then
@@ -424,8 +440,8 @@ function update_transformers(tick)
         local sample = produced * share
         if not (sample == sample and sample >= 0 and sample < math.huge) then sample = 0 end
         local parts = item.parts
-        -- The sample includes what our line-loss consumer drew (the burn set
-        -- last time), so smooth the useful part only: the burn is then
+        -- The sample includes what our line-loss consumer drew (the loss set
+        -- last time), so smooth the useful part only: the loss is then
         -- recomputed from it exactly, instead of feeding back on itself
         -- (which would settle slowly at high losses)
         local useful = sample - parts.line_burn
@@ -449,21 +465,21 @@ function update_transformers(tick)
       parts.p_deliv = parts.p_deliv * (1 - SMOOTHING)
       if parts.p_deliv < 1 then parts.p_deliv = 0 end
     end
-    -- delivered = (1 - loss) * output, so burn = delivered * loss / (1 - loss)
+    -- delivered = (1 - loss) * output, so line_burn = delivered * loss / (1 - loss)
     local loss = 1 - get_line_factor(parts)
     parts.line_burn = parts.p_deliv * loss / (1 - loss)
     parts.p_out = parts.p_deliv + parts.line_burn
     parts.p_in = parts.p_out / po_efficiency
     parts.ineff_burn = ineff_active and parts.p_in * (1 - efficiency) / efficiency or 0
-    -- Core loss: constant while switched on, burned with the inefficiency
+    -- Core loss: constant while switched on, drawn with the inefficiency
     local entity = parts.transformer
     local on = entity and entity.valid and entity.power_switch_state
     parts.no_load_burn = on and (parts.rating or 0) * settings_.no_load or 0
     parts.p_draw = parts.p_in + parts.ineff_burn + parts.no_load_burn
     -- Fed straight by generators: the wires between them and this
     -- transformer lose gen_loss of what the generators send, so
-    -- burn = draw * loss / (1 - loss)
-    local gen_loss = settings_.enabled and get_generator_loss(parts) or 0
+    -- gen_burn = draw * loss / (1 - loss)
+    local gen_loss = settings_.enabled and get_generator_loss(parts, tick) or 0
     if not (gen_loss == gen_loss and gen_loss > 0 and gen_loss < 1) then gen_loss = 0 end
     parts.gen_burn = parts.p_draw * gen_loss / (1 - gen_loss)
     set_burn(parts.line_eei, parts.line_burn)

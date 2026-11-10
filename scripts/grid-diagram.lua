@@ -1,9 +1,10 @@
 -- Grid diagram: a one-line schematic of the transformer grid on the map.
 --
 -- One straight line per route, from each transformer to each downstream
--- transformer it feeds (the routes found by line-losses.lua):
---   width  = power on the route (the source's output split among the
---            transformers it feeds in proportion to their draw)
+-- transformer downstream of it (the routes found by line-losses.lua):
+--   width  = power on the route (the source's delivered power split among
+--            its consumers in proportion to their draw, or as assigned by
+--            "feed nearest consumers first" when that is on)
 --   colour = line loss on the route: green < 10%, yellow < 50%, red above;
 --            grey when no power flows
 --   label  = "power · loss LL" at the midpoint
@@ -11,7 +12,8 @@
 -- all the power arriving at it (power-weighted over its feeders).
 -- A panel (left edge of the screen, draggable) shows the grid's energy balance, averaged over the last 5 s:
 -- generated power, power reaching machines, and power lost, split into
--- transformer inefficiency and line losses, each also as % of generation;
+-- transformers (inefficiency and core loss) and line losses, each also as %
+-- of generation;
 -- below it the routes losing the most power, each with a button that opens
 -- the map there.
 --
@@ -60,9 +62,6 @@ function grid_diagram_clear()
   for _, diamond in pairs(state.diamonds or {}) do
     destroy(diamond.id)
   end
-  for _, mark in pairs(state.marks or {}) do  -- role markers from an earlier build
-    destroy(mark.id)
-  end
   storage.grid_diagram = nil
 end
 
@@ -71,7 +70,7 @@ end
 -- (anything that is not a transformer or a loss consumer, accumulators
 -- charging included), "Line loss" and "Transf. ineff." consumers, and the
 -- transformers' own inputs. Everything generated either reaches a machine or
--- is burned as a loss, so
+-- is lost, so
 --   generated = machines + line losses + transformer losses
 -- where transformer losses also include any loss inside Power Overload's own
 -- transfer (when its efficiency is below 1).
@@ -132,16 +131,6 @@ end
 
 local WORST_ROUTES = 5
 
-local function legend(panel)
-  panel.add{type = "line", direction = "horizontal"}
-  panel.add{type = "label", caption = {"line-loss-grid.legend-title"}, style = "caption_label"}
-  for _, key in ipairs({"legend-routes", "legend-width", "legend-diamond"}) do
-    local l = panel.add{type = "label", caption = {"line-loss-grid." .. key}}
-    l.style.single_line = false
-    l.style.maximal_width = 340
-  end
-end
-
 ---@param player LuaPlayer
 function destroy_panel(player)
   -- gui.left: where older versions put it
@@ -158,9 +147,6 @@ function grid_diagram_on_moved(element, player_index)
   if element.name == PANEL_NAME then
     storage.grid_panel_location = storage.grid_panel_location or {}
     storage.grid_panel_location[player_index] = element.location
-  elseif element.name == "line-loss-map-legend" then
-    storage.legend_location = storage.legend_location or {}
-    storage.legend_location[player_index] = element.location
   end
 end
 
@@ -198,10 +184,7 @@ local function update_panel(player, balance, worst)
   panel.add{type = "label", caption = {"line-loss-grid.lost", format(balance.lost), percent_of(balance.lost, g)}}
   panel.add{type = "label", caption = {"line-loss-grid.lost-transformers", format(balance.transformer), percent_of(balance.transformer, g)}}
   panel.add{type = "label", caption = {"line-loss-grid.lost-lines", format(balance.line), percent_of(balance.line, g)}}
-  if #worst == 0 then
-    legend(panel)
-    return
-  end
+  if #worst == 0 then return end
   panel.add{type = "line", direction = "horizontal"}
   panel.add{type = "label", caption = {"line-loss-grid.worst-title"}, style = "caption_label"}
   for i, route in ipairs(worst) do
@@ -214,9 +197,9 @@ local function update_panel(player, balance, worst)
       tags = {line_loss_goto = true, x = route.x, y = route.y, surface = route.surface},
     }
     row.add{type = "label", caption = {"line-loss-grid.worst-route", i,
-      format(route.lost), string.format("%.1f", route.loss * 100), string.format("%d", math.floor(route.d + 0.5))}}
+      format(route.lost), string.format("%.1f", route.loss * 100), string.format("%d", math.floor(route.d + 0.5))},
+      tooltip = {"line-loss-grid.worst-route-tooltip"}}
   end
-  legend(panel)
 end
 
 -- "Show" button: open the map at the route's midpoint
@@ -480,8 +463,9 @@ function update_grid_diagram(tick, force)
     local entity = parts.transformer
     if (parts.gen_burn or 0) > 0 and entity and entity.valid then
       local p = entity.position
+      local gen_loss, gen_d = get_generator_loss(parts, tick)
       worst[#worst + 1] = {
-        lost = parts.gen_burn, loss = (get_generator_loss(parts)) or 0, d = select(2, get_generator_loss(parts)) or 0, unit = "gen>" .. unit,
+        lost = parts.gen_burn, loss = gen_loss or 0, d = gen_d or 0, unit = "gen>" .. unit,
         x = p.x, y = p.y, surface = entity.surface.index,
       }
     end

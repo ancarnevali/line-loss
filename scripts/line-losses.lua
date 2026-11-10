@@ -3,25 +3,33 @@
 --
 -- Each transformer gets an electrical distance D: the load-weighted
 -- shortest-path distance, along copper wires, from its output pole to the
--- consumers of its output network. Each wire's length is weighted by a
+-- consumers of its downstream network. Each wire's length is weighted by a
 -- resistance factor derived from the poles' maximum consumption, so long runs
 -- of small poles cost much more than big or huge pole trunks. The
--- transformer's line loss is the same weighted average taken over each
--- route's own loss, loss_per_tile * d capped at LINE_LOSS_MAX per route, and
--- is burned by its hidden "Line loss" consumer on the output network
+-- transformer's line loss comes from each route's own loss L, loss_per_tile
+-- * d capped at LINE_LOSS_MAX per route: a route delivering P loses
+-- P * L / (1 - L), so the transformer averages L / (1 - L) over its routes,
+-- weighted by the power each delivers, and its line loss is that average
+-- turned back into a share of its output (= total lost / total sent). It is
+-- drawn by its hidden "Line loss" consumer on the downstream network
 -- (transformers.lua).
 --
--- Consumers (proportional sharing: every source on a network sees the same
--- consumers with the same weights, only its own distances differ):
+-- Consumers of a transformer's downstream network:
 --   * downstream transformers, found by the search at their hidden input
---     pole, weighted by the power they draw (including their inefficiency);
+--     pole, weighted by the power they draw (inefficiency and core loss
+--     included);
 --   * everything else (machines) = network consumption without transformers
---     and loss consumers, spread evenly over the network's real poles,
---     because the game does not say which pole powers which machine.
---   D = (sum_k P_k * d_k + P_rest * mean_pole_d) / (sum_k P_k + P_rest)
--- Because each transformer applies its own D to the energy it actually
--- moves, the network's total loss is automatically power-weighted across
--- its sources.
+--     and loss consumers, spread evenly over the poles that have a supply
+--     area, because the game does not say which pole powers which machine.
+--     With "weight machines by their live load" on, each pole is weighted by
+--     the machines in its supply area and what their type draws right now.
+-- By default every transformer on a network sees the same consumers with the
+-- same weights, only its own distances differ. With "feed nearest consumers
+-- first" on, each transformer's power is assigned mostly to the consumers
+-- nearest to it (update_closeness_flows).
+-- D, the distance shown, is the same power-weighted average of the route
+-- distances. A transformer fed straight by generators also gets a generator
+-- line loss on its upstream network, from a second search over that network.
 --
 -- UPS: D is cached on the transformer. Searches run one transformer at a
 -- time, settling at most POLES_PER_TICK poles per tick, and only when its
@@ -35,26 +43,38 @@ local LINE_LOSS_MAX = 0.95  -- the line keeps at least 5% of the power
 local HIDDEN_PREFIX = "po-hidden-"
 local HIDDEN_INPUT_POLE = "po-hidden-electric-pole-in"
 
----@param entity LuaEntity
-local function is_hidden(entity)
-  return string.sub(entity.name, 1, #HIDDEN_PREFIX) == HIDDEN_PREFIX
-end
-
 -- Resistance per tile, relative to the big electric pole (= 1), from Power
 -- Overload's pole ratings (ratings.lua). Unrated poles count as 1. Derived
 -- only from startup settings and the active mods, so every client computes
 -- the same values and the cache needs no saving.
 local resistance_lookup
----@param pole LuaEntity
-local function resistance(pole)
-  if not resistance_lookup then
-    resistance_lookup = ratings.make_resistance_lookup(shared, settings.startup, script.active_mods)
+
+-- Per prototype name: {hidden, pole, r} = Power Overload's hidden entity,
+-- an electric pole, resistance per tile. Read once per prototype, so a search
+-- reads only the name of each pole it meets. Derived from prototypes and
+-- startup settings only, like the resistance: no saving needed.
+local prototype_info = {}
+---@param name string
+local function info_of(name)
+  local info = prototype_info[name]
+  if not info then
+    if not resistance_lookup then
+      resistance_lookup = ratings.make_resistance_lookup(shared, settings.startup, script.active_mods)
+    end
+    local prototype = prototypes.entity[name]
+    info = {
+      hidden = string.sub(name, 1, #HIDDEN_PREFIX) == HIDDEN_PREFIX,
+      pole = prototype ~= nil and prototype.type == "electric-pole",
+      r = resistance_lookup(name) or 1,
+    }
+    prototype_info[name] = info
   end
-  return resistance_lookup(pole.name) or 1
+  return info
 end
 
 function reset_line_loss_cache()
   resistance_lookup = nil
+  prototype_info = {}
 end
 
 -- Binary min-heap of {distance, unit_number, entity} ------------------------
@@ -98,6 +118,7 @@ function init_line_losses()
   storage.line_loss_queue = {}        -- slow safety round (unit numbers)
   storage.line_loss_dirty = {}        -- unit -> true: needs a search soon
   storage.line_loss_dirty_list = {}   -- the same, in order
+  storage.line_loss_dirty_head = 1    -- next one to search
   storage.line_loss_pending_networks = {}  -- network id -> true: changed
   storage.line_loss_input_poles = nil
   -- sink transformer unit_number -> {source transformer unit_number -> distance}
@@ -116,7 +137,7 @@ end
 
 -- Scheduling ------------------------------------------------------------------
 -- A transformer's search is re-run soon (POLES_PER_TICK) when something on
--- its output network changed: a pole built or removed there, its network
+-- its downstream network changed: a pole built or removed there, its network
 -- merged or split (network id changed, seen by the power measurement), or a
 -- transformer added or removed on it. A slow round over all transformers
 -- (SAFETY_POLES_PER_TICK) catches what no event reports, such as a wire
@@ -157,9 +178,19 @@ local function resolve_pending_networks()
   if not pending or next(pending) == nil then return end
   local units = {}
   for unit, parts in pairs(storage.transformers) do
-    local pole_out, pole_in = parts.pole_out, parts.pole_in
-    if (pole_out and pole_out.valid and pending[pole_out.electric_network_id or 0])
-      or (pole_in and pole_in.valid and pending[pole_in.electric_network_id or 0]) then
+    -- The network ids kept by update_transformers; read from the poles only
+    -- until its first pass. An id that changed since then (networks merged
+    -- or split) is caught there within a second and searched again.
+    local out_net, in_net = parts.out_net, parts.in_net
+    if out_net == nil then
+      local pole_out = parts.pole_out
+      out_net = pole_out and pole_out.valid and pole_out.electric_network_id
+    end
+    if in_net == nil then
+      local pole_in = parts.pole_in
+      in_net = pole_in and pole_in.valid and pole_in.electric_network_id
+    end
+    if pending[out_net or 0] or pending[in_net or 0] then
       units[#units + 1] = unit
     end
   end
@@ -186,13 +217,25 @@ end
 
 ---@return UnitNumber?
 local function pop_dirty()
+  -- First in, first out: a read position instead of shifting the list.
+  -- The list is emptied as soon as it is used up, so #list > 0 still means
+  -- "something is waiting".
   local list = storage.line_loss_dirty_list
-  while #list > 0 do
-    local unit = table.remove(list, 1)
+  local head = storage.line_loss_dirty_head or 1
+  local n = #list
+  local found
+  while head <= n and not found do
+    local unit = list[head]
+    head = head + 1
     storage.line_loss_dirty[unit] = nil
-    if storage.transformers[unit] then return unit end
+    if storage.transformers[unit] then found = unit end
   end
-  return nil
+  if head > n then
+    storage.line_loss_dirty_list = {}
+    head = 1
+  end
+  storage.line_loss_dirty_head = head
+  return found
 end
 
 ---@return UnitNumber?
@@ -237,12 +280,12 @@ local function new_job(unit, urgent)
 end
 
 -- Generator networks -----------------------------------------------------------
--- A transformer whose input network is fed by no other transformer draws
+-- A transformer whose upstream network is fed by no other transformer draws
 -- straight from generators. Its upstream line loss comes from a second
 -- search, from its input pole outwards over that network, with each pole
 -- weighted by the rated output of the generators in its supply area: a steam
 -- engine far down the line costs more than one next to the transformer. The
--- loss is burned by a "Line loss" consumer on the generator network.
+-- loss is drawn by a "Line loss" consumer on the generator network.
 
 ---@param parts table
 ---@return boolean
@@ -286,13 +329,24 @@ local function rated_output(entity)
   return v
 end
 
+-- Supply area distance of a pole, cached per prototype and quality
+local supply_cache = {}
 ---@param pole LuaEntity
-local function supply_distance(pole)
+---@param name string?  the pole's prototype name, when the caller has it
+local function supply_distance(pole, name)
+  local quality = pole.quality
+  local key = (name or pole.name) .. "/" .. (quality and quality.name or "normal")
+  local v = supply_cache[key]
+  if v then return v end
   local prototype = pole.prototype
-  local ok, v = pcall(function() return prototype.get_supply_area_distance(pole.quality) end)
-  if ok and type(v) == "number" then return v end
-  ok, v = pcall(function() return prototype.supply_area_distance end)
-  return (ok and type(v) == "number") and v or 2.5
+  local ok
+  ok, v = pcall(function() return prototype.get_supply_area_distance(quality) end)
+  if not (ok and type(v) == "number") then
+    ok, v = pcall(function() return prototype.supply_area_distance end)
+    if not (ok and type(v) == "number") then v = 2.5 end
+  end
+  supply_cache[key] = v
+  return v
 end
 
 -- Rated output of the generators in a pole's supply area, each generator
@@ -300,9 +354,11 @@ end
 ---@param pole LuaEntity
 ---@param job table  records each generator's distance and rating in job.gens
 ---@param d number   the pole's distance
-local function generator_weight(pole, job, d)
+---@param r number   the pole's supply area distance
+local function generator_weight(pole, job, d, r)
   local seen = job.seen_generators
-  local p, r = pole.position, supply_distance(pole)
+  if r <= 0 then return 0 end
+  local p = pole.position  -- poles without a supply area (big, huge, fuses)
   local found = pole.surface.find_entities_filtered{
     area = {{p.x - r, p.y - r}, {p.x + r, p.y + r}},
     type = generator_types(pole.surface),
@@ -340,11 +396,13 @@ end
 
 ---@param pole LuaEntity
 ---@param job table
+---@param r number  the pole's supply area distance
 ---@return table?  machine name -> count
-local function machine_counts(pole, job)
+local function machine_counts(pole, job, r)
   local names = job.machine_names
   if not names then return nil end
-  local p, r = pole.position, supply_distance(pole)
+  if r <= 0 then return nil end
+  local p = pole.position
   local found = pole.surface.find_entities_filtered{
     area = {{p.x - r, p.y - r}, {p.x + r, p.y + r}},
     name = names,
@@ -407,7 +465,7 @@ end
 
 local function add_types(types, counts, d)
   if not counts then return end
-  local loss, inv = get_route_line_loss(d), 1 / math.max(d, 1)
+  local loss, inv = get_route_loss_ratio(d), 1 / math.max(d, 1)
   for name, c in pairs(counts) do
     local x = types[name]
     if not x then
@@ -483,7 +541,7 @@ local function rebuild_generator_region(unit)
         end
         r.w = r.w + w
         r.wd = r.wd + w * d
-        r.wloss = r.wloss + w * get_route_line_loss(d)
+        r.wloss = r.wloss + w * get_route_loss_ratio(d)
         r.winv = r.winv + w / math.max(d, 1)
       end
     end
@@ -568,11 +626,12 @@ end
 -- when "feed nearest consumers first" is on and the pairing is fresh,
 -- otherwise the average over every generator on its network.
 ---@param parts table
+---@param tick GameTick?  the current tick, when the caller has it
 ---@return number? loss, number? distance
-function get_generator_loss(parts)
+function get_generator_loss(parts, tick)
   if not parts.gen_loss_all then return nil end
   if storage.settings.closeness and parts.gen_loss and parts.gen_flows_tick
-    and game.tick - parts.gen_flows_tick <= 2 * FLOW_PERIOD then
+    and (tick or game.tick) - parts.gen_flows_tick <= 2 * FLOW_PERIOD then
     return parts.gen_loss, parts.gen_distance
   end
   return parts.gen_loss_all, parts.gen_distance_all
@@ -656,7 +715,7 @@ function update_generator_flows(tick)
         end
         local parts = transformers[unit]
         if total > 1e-9 then
-          parts.gen_loss, parts.gen_distance = wloss / total, wd / total
+          parts.gen_loss, parts.gen_distance = loss_from_ratio(wloss / total), wd / total
           parts.gen_flows_tick = tick
         end
       end
@@ -673,13 +732,13 @@ local function finish_generator_job(job)
   for _, item in ipairs(job.settled) do
     -- No generators found next to any pole: spread generation evenly
     local w = total_w > 0 and item[3] or 1
-    num_loss = num_loss + w * get_route_line_loss(item[2])
+    num_loss = num_loss + w * get_route_loss_ratio(item[2])
     num_d = num_d + w * item[2]
     den = den + w
   end
   -- Average over every generator on the network: used alone, or until the
   -- pairing below has run
-  parts.gen_loss_all = den > 0 and num_loss / den or 0
+  parts.gen_loss_all = den > 0 and loss_from_ratio(num_loss / den) or 0
   parts.gen_distance_all = den > 0 and num_d / den or 0
   parts.gen_network = parts.in_net
   generator_ownership_apply(job.transformer, job.gens)
@@ -727,6 +786,7 @@ local function finish_job(job, tick)
     -- for the per-tile setting it was computed with
     transformer_parts.line_sum_loss = job.sum_loss
     transformer_parts.line_sum_loss_per_tile = job.per_tile
+    transformer_parts.line_sum_loss_kind = "ratio"  -- sums of L / (1 - L) (0.1.3)
     transformer_parts.line_n = job.count
     -- Machines per type over the whole network (machine weighting)
     local types, any = {}, false
@@ -753,18 +813,26 @@ local function step_job(job, budget, tick)
     if not done[unit_number] and pole.valid then
       done[unit_number] = true
       budget = budget - 1
-      local hidden = is_hidden(pole)
+      local name = pole.name
+      local info = info_of(name)
+      local hidden = info.hidden
       if job.kind == "gen" then
         if not hidden then
-          job.settled[#job.settled + 1] = {pole, d, generator_weight(pole, job, d)}
+          job.settled[#job.settled + 1] = {pole, d, generator_weight(pole, job, d, supply_distance(pole, name))}
         end
       elseif not hidden then
-        job.sum = job.sum + d
-        job.sum_loss = job.sum_loss + get_route_line_loss(d)
-        job.count = job.count + 1
+        -- Machines are spread only over poles that can power them: big poles,
+        -- huge poles and fuses have no supply area, so they only carry power
+        local reach = supply_distance(pole, name)
+        local supplies = reach > 0
+        if supplies then
+          job.sum = job.sum + d
+          job.sum_loss = job.sum_loss + get_route_loss_ratio(d)
+          job.count = job.count + 1
+        end
         local settled = job.settled
-        if settled then settled[#settled + 1] = {pole, d, machine_counts(pole, job)} end
-      elseif pole.name == HIDDEN_INPUT_POLE then
+        if settled then settled[#settled + 1] = {pole, d, supplies and machine_counts(pole, job, reach) or nil, not supplies} end
+      elseif name == HIDDEN_INPUT_POLE then
         -- Another transformer's input: a consumer on this network
         local sink = get_input_poles()[unit_number]
         if sink and sink ~= job.transformer then
@@ -776,16 +844,17 @@ local function step_job(job, budget, tick)
       if unit_number == job.start or not hidden then
         local connector = pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
         if connector then
-          local r1 = resistance(pole)
+          local r1 = info.r
           local p1 = pole.position
           for _, connection in pairs(connector.connections) do
             local other = connection.target.owner
-            if other.valid and other.type == "electric-pole" then
+            local other_info = info_of(other.name)
+            if other_info.pole then
               local other_unit_number = other.unit_number
               if not done[other_unit_number] then
                 local p2 = other.position
                 local dx, dy = p2.x - p1.x, p2.y - p1.y
-                local weight = math.sqrt(dx * dx + dy * dy) * 0.5 * (r1 + resistance(other))
+                local weight = math.sqrt(dx * dx + dy * dy) * 0.5 * (r1 + other_info.r)
                 local new_d = d + weight
                 local best = dist[other_unit_number]
                 if not best or new_d < best then
@@ -859,7 +928,7 @@ function update_line_losses(tick)
         job = nil
         storage.line_loss_job = nil
         -- After its output search, a transformer drawing straight from
-        -- generators also searches its input network
+        -- generators also searches its upstream network
         if finished.kind == "out" then
           local parts = storage.transformers[finished.transformer]
           if parts and on_generator_network(parts) then
@@ -915,7 +984,7 @@ local function rebuild_region(source)
   local region, n = {}, 0
   for unit in pairs(storage.source_reach[source] or {}) do
     local entry = pole_dist[unit]
-    if entry and entry.owner == source then
+    if entry and entry.owner == source and not entry.ns then
       n = n + 1
       for j, d in pairs(entry.s) do
         local r = region[j]
@@ -924,7 +993,7 @@ local function rebuild_region(source)
           region[j] = r
         end
         r.sum_d = r.sum_d + d
-        r.sum_loss = r.sum_loss + get_route_line_loss(d)
+        r.sum_loss = r.sum_loss + get_route_loss_ratio(d)
         r.sum_inv = r.sum_inv + 1 / math.max(d, 1)
         if entry.m then
           r.t = r.t or {}
@@ -965,7 +1034,8 @@ function pole_ownership_apply(source, settled)
         pole_dist[unit] = entry
       end
       entry.m = item[3]
-      entry.pole = pole  -- for the loss map
+      entry.ns = item[4] or nil  -- no supply area: carries power, powers no machine
+      entry.pole = pole  -- for the line-loss map
       if entry.s[source] ~= d then
         entry.s[source] = d
         -- the owner's region, as seen from this source, changed
@@ -1028,16 +1098,17 @@ end
 -- route loss. Until the next search after a change of the per-tile setting,
 -- falls back to the loss of the mean pole distance.
 ---@return number
-local function mean_pole_loss(parts, tick)
+local function mean_pole_ratio(parts, tick)
   local n = parts.line_n
   if not n or n == 0 then return 0 end
   local weights = machine_type_weights(parts.pole_out, parts.line_types and type_totals(parts.line_types), tick or game.tick)
   local _, wl = weighted_stats(parts.line_types, weights)
   if wl then return wl end
-  if parts.line_sum_loss and parts.line_sum_loss_per_tile == storage.settings.per_tile then
+  if parts.line_sum_loss and parts.line_sum_loss_per_tile == storage.settings.per_tile
+    and parts.line_sum_loss_kind == "ratio" then
     return parts.line_sum_loss / n
   end
-  return get_route_line_loss(parts.line_sum_d / n)
+  return get_route_loss_ratio(parts.line_sum_d / n)
 end
 
 -- Recomputes D and the line loss from the cached distances and the current
@@ -1058,7 +1129,7 @@ function update_line_distance(transformer_parts, tick)
     local sink_parts = transformers[sink.unit]
     local p = sink_parts and sink_parts.p_draw or 0
     num = num + p * sink.d
-    num_loss = num_loss + p * get_route_line_loss(sink.d)
+    num_loss = num_loss + p * get_route_loss_ratio(sink.d)
     den = den + p
   end
 
@@ -1070,14 +1141,14 @@ function update_line_distance(transformer_parts, tick)
     p_rest = get_network_loads(pole_out, tick).machines
   end
   local mean_pole_d = n > 0 and transformer_parts.line_sum_d / n or 0
-  local pole_loss = mean_pole_loss(transformer_parts, tick)
+  local pole_loss = mean_pole_ratio(transformer_parts, tick)
   do
     -- Machine weighting: the machines' distance follows where the load is
     local weights = machine_type_weights(pole_out, transformer_parts.line_types and type_totals(transformer_parts.line_types), tick)
     local wd = weighted_stats(transformer_parts.line_types, weights)
     if wd then mean_pole_d = wd end
   end
-  -- Total load on the output network, used to split this transformer's
+  -- Total load on the downstream network, used to split this transformer's
   -- output among its consumers (grid-diagram.lua)
   transformer_parts.line_load_total = den + p_rest
 
@@ -1090,26 +1161,26 @@ function update_line_distance(transformer_parts, tick)
 
   if den + p_rest > 0 then
     transformer_parts.line_distance = (num + p_rest * mean_pole_d) / (den + p_rest)
-    transformer_parts.line_loss = (num_loss + p_rest * pole_loss) / (den + p_rest)
+    transformer_parts.line_loss = loss_from_ratio((num_loss + p_rest * pole_loss) / (den + p_rest))
   elseif n > 0 then
     -- No load at all: fall back to the plain mean so the readout is not 0
     transformer_parts.line_distance = mean_pole_d
-    transformer_parts.line_loss = pole_loss
+    transformer_parts.line_loss = loss_from_ratio(pole_loss)
   elseif #sinks > 0 then
     local total, total_loss = 0, 0
     for _, sink in pairs(sinks) do
       total = total + sink.d
-      total_loss = total_loss + get_route_line_loss(sink.d)
+      total_loss = total_loss + get_route_loss_ratio(sink.d)
     end
     transformer_parts.line_distance = total / #sinks
-    transformer_parts.line_loss = total_loss / #sinks
+    transformer_parts.line_loss = loss_from_ratio(total_loss / #sinks)
   else
     transformer_parts.line_distance = 0
     transformer_parts.line_loss = 0
   end
 end
 
--- Closeness-weighted flows (opt-in setting "line-loss-closeness")
+-- Closeness-weighted flows (setting "line-loss-closeness", on by default)
 -- ---------------------------------------------------------------------------
 -- Proportional sharing assumes every source feeds every consumer of its
 -- network in the same proportions. With this option, power is assigned to the
@@ -1153,9 +1224,9 @@ local REST = "rest"
 ---@param tick GameTick
 -- Sparse kernel per network, rebuilt only when the network's sources or their
 -- distances change (finish_job keeps a source's line_sinks table when its
--- contents did not change). Derived purely from storage, so it is a cache:
--- after loading a save it is rebuilt with identical results.
-local kernel_cache = {}
+-- contents did not change). Kept in storage (storage.line_loss_kernels,
+-- network id -> kernel): a player joining a multiplayer game must receive the
+-- kernels the others hold, not rebuild them from the state at that moment.
 
 -- Column keys: a downstream transformer's unit number; "r<unit>" for the
 -- machines on the poles that source owns; REST for all the network's machines
@@ -1274,6 +1345,8 @@ function update_closeness_flows(tick)
   local transformers = storage.transformers
   storage.line_loss_flow_state = storage.line_loss_flow_state or {}
   local flow_state = storage.line_loss_flow_state
+  storage.line_loss_kernels = storage.line_loss_kernels or {}
+  local kernel_cache = storage.line_loss_kernels
   local slots = FLOW_PERIOD / FLOW_INTERVAL
   local slot = (tick / FLOW_INTERVAL) % slots
 
@@ -1427,7 +1500,7 @@ function update_closeness_flows(tick)
         a_by[unit] = a[i]
         local parts = transformers[unit]
         local rj, rv, rd = row_j[i], row_v[i], row_d[i]
-        local pole_loss = mean_pole_loss(parts, tick)
+        local pole_loss = mean_pole_ratio(parts, tick)
         local flows, total, weighted, weighted_loss = {}, 0, 0, 0
         for x = 1, #rj do
           local f = a[i] * rv[x] * b[rj[x]]
@@ -1444,9 +1517,9 @@ function update_closeness_flows(tick)
           elseif regions[k] then
             local r = transformers[regions[k]].region[unit]
             local _, wl = weighted_stats(r and r.t, weights)
-            route_loss = wl or (r and r.n > 0 and r.sum_loss / r.n) or get_route_line_loss(rd[x])
+            route_loss = wl or (r and r.n > 0 and r.sum_loss / r.n) or get_route_loss_ratio(rd[x])
           else
-            route_loss = get_route_line_loss(rd[x])
+            route_loss = get_route_loss_ratio(rd[x])
           end
           weighted_loss = weighted_loss + f * route_loss
         end
@@ -1454,7 +1527,7 @@ function update_closeness_flows(tick)
         parts.line_flows_tick = tick
         local d = total > TINY and weighted / total
         if d and d == d and d < math.huge then parts.line_distance = d end
-        local loss = total > TINY and weighted_loss / total
+        local loss = total > TINY and loss_from_ratio(weighted_loss / total)
         if loss and loss == loss and loss < math.huge then parts.line_loss = loss end
       end
       flow_state[network_id] = {a = a_by, b = b_by, tick = tick}
@@ -1482,11 +1555,99 @@ function get_route_line_loss(distance)
   return loss
 end
 
+-- Power lost per unit delivered on a route: L / (1 - L). Averages over
+-- several routes are taken of this ratio, weighted by the power each route
+-- delivers, so that delivered x average = the sum of every route's loss
+-- exactly (averaging L itself would under-charge when routes differ, as
+-- L / (1 - L) grows faster than L).
+---@param distance number
+---@return number
+function get_route_loss_ratio(distance)
+  local loss = get_route_line_loss(distance)
+  return loss / (1 - loss)
+end
+
+-- Back from an averaged ratio to a loss: the share of the power sent out
+-- that is lost on the way, over all the routes together.
+---@param ratio number
+---@return number
+function loss_from_ratio(ratio)
+  if not (ratio == ratio and ratio > 0) then return 0 end
+  if ratio == math.huge then return LINE_LOSS_MAX end
+  return ratio / (1 + ratio)
+end
+
+-- Line losses compounded from the generators down to a transformer's input.
+-- Only line losses: transformer inefficiency and core loss are not counted, so
+-- it stays comparable with the single-stage value below. Each feeder counts
+-- for the power it sends, as in get_upstream_line_loss.
+local cumulative_cache, cumulative_cache_tick = {}, -1
+
+-- Share of the generated power still on the wires when it reaches this
+-- transformer's input. `path` is the chain being walked, so a loop stops.
+---@param unit UnitNumber
+---@param path table<UnitNumber, boolean>
+---@param depth integer
+---@return number
+local function surviving_share(unit, path, depth)
+  if path[unit] or depth > 32 then return 1 end
+  local parts = storage.transformers[unit]
+  if not parts then return 1 end
+  local feeders = storage.line_loss_feeders and storage.line_loss_feeders[unit]
+  if not feeders or next(feeders) == nil then
+    -- Fed straight by generators: the generator wires are the only stage
+    return 1 - (get_generator_loss(parts, cumulative_cache_tick) or 0)
+  end
+  path[unit] = true
+  local num, den, sum, count = 0, 0, 0, 0
+  local s = storage.settings
+  for source, d in pairs(feeders) do
+    local source_parts = storage.transformers[source]
+    if source_parts then
+      local share = surviving_share(source, path, depth + 1) * (1 - get_route_line_loss(d))
+      local p = source_parts.p_deliv or 0
+      local flows = s.closeness and source_parts.line_flows
+      if flows then p = flows[unit] or 0 end
+      num = num + p * share
+      den = den + p
+      sum = sum + share
+      count = count + 1
+    end
+  end
+  path[unit] = nil
+  if count == 0 then return 1 end
+  local share = den > 0 and num / den or sum / count
+  if not (share == share and share > 0 and share <= 1) then return 1 end
+  return share
+end
+
+-- Everything lost in the wires between the generators and this transformer,
+-- compounded over every stage: 1 - (1 - L1)(1 - L2)...
+---@param unit_number UnitNumber
+---@return number? loss  nil when line losses are off or the transformer is unknown
+function get_cumulative_line_loss(unit_number)
+  if not storage.settings.enabled then return nil end
+  if not storage.transformers[unit_number] then return nil end
+  local tick = game.tick
+  if cumulative_cache_tick ~= tick then
+    cumulative_cache, cumulative_cache_tick = {}, tick
+  end
+  local loss = cumulative_cache[unit_number]
+  if loss == nil then
+    loss = 1 - surviving_share(unit_number, {}, 0)
+    if not (loss == loss and loss >= 0 and loss < 1) then loss = 0 end
+    cumulative_cache[unit_number] = loss
+  end
+  return loss
+end
+
 -- Line loss of the power arriving at a transformer from upstream (display
 -- only: the loss itself is charged at the transformers feeding the network).
--- Under proportional sharing this transformer receives each source's power
--- in proportion to that source's output, so the arriving power's loss is the
--- power-weighted mean of the (individually capped) routes from those sources.
+-- Average over the routes from the transformers feeding it, weighted by the
+-- power each one sends here, taken of the loss ratio L / (1 - L) of each
+-- (individually capped) route and turned back into a loss. Not the same as a
+-- feeder's downstream line loss, which averages over all that feeder's
+-- consumers.
 ---@param unit_number UnitNumber
 ---@return number? loss, number? distance  nil when nothing feeds it through a transformer
 function get_upstream_line_loss(unit_number)
@@ -1507,7 +1668,7 @@ function get_upstream_line_loss(unit_number)
       local p = source_parts.p_deliv or 0
       local flows = s.closeness and source_parts.line_flows
       if flows then p = flows[unit_number] or 0 end
-      local route_loss = get_route_line_loss(d)
+      local route_loss = get_route_loss_ratio(d)
       num = num + p * d
       num_loss = num_loss + p * route_loss
       den = den + p
@@ -1518,7 +1679,7 @@ function get_upstream_line_loss(unit_number)
   end
   if count == 0 then return nil end
   local distance = den > 0 and num / den or sum_d / count
-  local loss = den > 0 and num_loss / den or sum_loss / count
+  local loss = loss_from_ratio(den > 0 and num_loss / den or sum_loss / count)
   if distance ~= distance or loss ~= loss then return nil end
   return loss, distance
 end

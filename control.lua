@@ -7,8 +7,6 @@ require("__line-loss__/scripts/grid-diagram")
 require("__line-loss__/scripts/hover")
 require("__line-loss__/scripts/heatmap")
 require("__line-loss__/scripts/transformer-panel")
-require("__line-loss__/scripts/loss-map")
-require("__line-loss__/scripts/map-legend")
 
 -- Settings -----------------------------------------------------------------------
 
@@ -39,7 +37,6 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
       reset_hover()
       grid_diagram_clear()
       heatmap_clear()
-      loss_map_clear()
     elseif storage.settings.per_tile ~= old_per_tile or name == "line-loss-machine-weighting" then
       mark_all_line_loss_dirty()  -- per-pole losses / machine counts depend on it
     end
@@ -53,8 +50,21 @@ local function setup()
   read_settings()
   reset_hover()
   grid_diagram_clear()
-  heatmap_clear()
-  loss_map_clear()
+  heatmap_clear()  -- also clears the dots of the old "power lost per pole" view
+  -- Legend window from 0.1.2 (removed)
+  for _, player in pairs(game.players) do
+    local legend = player.gui.screen["line-loss-map-legend"]
+    if legend then legend.destroy() end
+  end
+  storage.legend_location = nil
+  -- High- and low-priority transformers are hidden (data-final-fixes): lock
+  -- their recipes in saves that had unlocked them
+  for _, force in pairs(game.forces) do
+    for _, name in pairs({"po-transformer-high", "po-transformer-low"}) do
+      local recipe = force.recipes[name]
+      if recipe then recipe.enabled = false end
+    end
+  end
   scan_transformers()
   init_line_losses()  -- after the scan, so every transformer is queued
 end
@@ -132,8 +142,6 @@ script.on_event(defines.events.on_tick, function(event)
   update_grid_diagram(tick)
   update_hover(tick)
   update_heatmap(tick)
-  update_loss_map(tick)
-  update_map_legend(tick)
   update_transformer_panels(tick)
 end)
 
@@ -147,22 +155,13 @@ script.on_event("line-loss-toggle-grid-diagram", function(event)
   toggle_grid_diagram(game.get_player(event.player_index), event.tick)
 end)
 script.on_event("line-loss-toggle-heatmap", function(event)
-  toggle_heatmap(game.get_player(event.player_index))
-  update_map_legend(event.tick, true)
-end)
-script.on_event("line-loss-toggle-loss-map", function(event)
-  toggle_loss_map(game.get_player(event.player_index), event.tick)
-  update_map_legend(event.tick, true)
+  toggle_heatmap(game.get_player(event.player_index), event.tick)
 end)
 script.on_event(defines.events.on_lua_shortcut, function(event)
   if event.prototype_name == "line-loss-toggle-grid-diagram" then
     toggle_grid_diagram(game.get_player(event.player_index), event.tick)
   elseif event.prototype_name == "line-loss-toggle-heatmap" then
-    toggle_heatmap(game.get_player(event.player_index))
-    update_map_legend(event.tick, true)
-  elseif event.prototype_name == "line-loss-toggle-loss-map" then
-    toggle_loss_map(game.get_player(event.player_index), event.tick)
-    update_map_legend(event.tick, true)
+    toggle_heatmap(game.get_player(event.player_index), event.tick)
   end
 end)
 
