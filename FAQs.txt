@@ -222,8 +222,9 @@ A: Hidden by this mod. A high-priority transformer supplies its downstream netwo
 
 Q: Will it slow my game down?
 A: Distances are only searched again when a network changes (a pole built or removed, networks
-   merged or split, a transformer added or removed), at up to 100 poles per tick, plus a slow
-   background pass of 10 poles per tick. Power is measured once a second. To check the cost on your
+   merged or split, a transformer added or removed), at up to 100 poles per tick. Searches read the
+   wires from a cached copy; a background check compares 20 cached poles per tick with the game, to
+   catch wires changed without an event. Power is measured once a second. To check the cost on your
    save, enable "show-time-usage" in the debug settings (F4).
 
 Q: What is the big transmission pole?

@@ -83,7 +83,8 @@ powers nothing around it. Use it for long lines past factories. Unlocked with th
 ## Performance
 
 * Searches run one transformer at a time, only when its network changes (up to 100 poles per tick),
-  plus a slow background pass (10 poles per tick).
+  and read the wires from a cached copy. A background check compares 20 cached poles per tick with
+  the game.
 * Power is measured once a second; losses follow load changes within a few seconds.
 * "Weight machines by their live load" adds an entity search per pole and re-searches when machines
   are built or removed.
@@ -93,8 +94,8 @@ powers nothing around it. Use it for long lines past factories. Unlocked with th
 
 * Power Overload's high- and low-priority transformers are hidden, so they don't interfere with how
   this mod assigns generators and consumers to transformers.
-* A wire added inside a network is picked up by the background pass, which can take a while on
-  large bases.
+* A wire added or removed inside a network is picked up by the background check: a few seconds on a
+  5,000-pole base, longer on bigger ones.
 * By default machine load counts as spread evenly over the poles; turn on machine weighting to
   locate it.
 * Not charged: machines on a generator network with no transformer in between, and generators wired

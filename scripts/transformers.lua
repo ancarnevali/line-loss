@@ -305,6 +305,22 @@ local function ensure_consumer(parts, key, name, surface, position)
   return entity
 end
 
+-- "Line loss" consumer on the upstream network, kept only while that is a
+-- generator network (the transformer pays for the wires to its generators)
+---@param parts LineLossTransformer
+---@param wanted boolean
+function set_generator_consumer(parts, wanted)
+  if wanted then
+    local entity = parts.transformer
+    if not (entity and entity.valid) then return end
+    local hidden_surface = game.get_surface(entity.surface.name .. "-transformer")
+    if hidden_surface then ensure_consumer(parts, "line_in_eei", LINE_EEI, hidden_surface, parts.position_in) end
+  elseif parts.line_in_eei then
+    if parts.line_in_eei.valid then parts.line_in_eei.destroy() end
+    parts.line_in_eei = nil
+  end
+end
+
 -- Finds Power Overload's hidden parts and creates our consumers next to them.
 -- Power Overload creates its interfaces a tick after the transformer is built
 -- and may recreate them, so this is retried until everything is found.
@@ -336,15 +352,14 @@ local function refresh_parts(parts)
   end
   ensure_consumer(parts, "line_eei", LINE_EEI, hidden_surface, parts.position_out)
   ensure_consumer(parts, "ineff_eei", INEFF_EEI, hidden_surface, parts.position_in)
-  -- Line loss between generators and this transformer (generator networks)
-  ensure_consumer(parts, "line_in_eei", LINE_EEI, hidden_surface, parts.position_in)
+  set_generator_consumer(parts, parts.gen_loss_all ~= nil)
 end
 
 local function complete(parts)
   return parts.pole_in and parts.pole_in.valid and parts.pole_out and parts.pole_out.valid
     and parts.interface_out and parts.interface_out.valid
     and parts.line_eei and parts.line_eei.valid and parts.ineff_eei and parts.ineff_eei.valid
-    and parts.line_in_eei and parts.line_in_eei.valid
+    and (parts.gen_loss_all == nil) == (parts.line_in_eei == nil)
 end
 
 ---@param entity LuaEntity?

@@ -37,12 +37,14 @@
 --
 -- UPS: D is cached on the transformer. Searches run one transformer at a
 -- time, settling at most POLES_PER_TICK poles per tick, and only when its
--- network changed (see Scheduling); otherwise a slow safety round settles
--- SAFETY_POLES_PER_TICK poles per tick. Cost per tick is bounded regardless
--- of base size.
+-- network changed (see Scheduling). They read the wires from a cached wire
+-- graph (storage.wire_graph); a slow sweep checks SWEEP_POLES_PER_TICK cached
+-- poles per tick against the game. Cost per tick is bounded regardless of
+-- base size.
 
-local POLES_PER_TICK = 100        -- searches after a change
-local SAFETY_POLES_PER_TICK = 10  -- slow round over everything
+local POLES_PER_TICK = 100       -- searches after a change
+local SWEEP_POLES_PER_TICK = 20  -- wire-graph check: wire counts (3 reads per pole)
+local SWEEP_FULL_PER_TICK = 1    -- wire-graph check: every wire's far end
 local LINE_LOSS_MAX = 0.95  -- the line keeps at least 5% of the power
 local HIDDEN_PREFIX = "po-hidden-"
 local HIDDEN_INPUT_POLE = "po-hidden-electric-pole-in"
@@ -119,7 +121,10 @@ end
 -- Job management --------------------------------------------------------------
 
 function init_line_losses()
-  storage.line_loss_queue = {}        -- slow safety round (unit numbers)
+  storage.line_loss_queue = nil       -- old safety round (before 0.1.5)
+  storage.wire_graph = {}             -- pole unit -> cached wires (see below)
+  storage.wire_sweep_list = nil
+  storage.wire_sweep_pos = 1
   storage.line_loss_dirty = {}        -- unit -> true: needs a search soon
   storage.line_loss_dirty_list = {}   -- the same, in order
   storage.line_loss_dirty_head = 1    -- next one to search
@@ -143,9 +148,10 @@ end
 -- A transformer's search is re-run soon (POLES_PER_TICK) when something on
 -- its downstream network changed: a pole built or removed there, its network
 -- merged or split (network id changed, seen by the power measurement), or a
--- transformer added or removed on it. A slow round over all transformers
--- (SAFETY_POLES_PER_TICK) catches what no event reports, such as a wire
--- added or removed inside a network without merging or splitting it.
+-- transformer added or removed on it; for a transformer fed straight by
+-- generators, also its upstream network. The wire-graph sweep catches what no
+-- event reports, such as a wire added or removed inside a network without
+-- merging or splitting it, and queues that network.
 
 ---@param unit UnitNumber
 function mark_line_loss_dirty(unit)
@@ -181,6 +187,12 @@ local function resolve_pending_networks()
   local pending = storage.line_loss_pending_networks
   if not pending or next(pending) == nil then return end
   local units = {}
+  -- An upstream network matters only to a transformer fed straight by
+  -- generators (no transformer feeds it): its generator search covers it
+  local fed = {}
+  for _, parts in pairs(storage.transformers) do
+    if parts.out_net then fed[parts.out_net] = true end
+  end
   for unit, parts in pairs(storage.transformers) do
     -- The network ids kept by update_transformers; read from the poles only
     -- until its first pass. An id that changed since then (networks merged
@@ -194,7 +206,8 @@ local function resolve_pending_networks()
       local pole_in = parts.pole_in
       in_net = pole_in and pole_in.valid and pole_in.electric_network_id
     end
-    if pending[out_net or 0] or pending[in_net or 0] then
+    -- (or was, until now: its generator loss must be cleared)
+    if pending[out_net or 0] or (pending[in_net or 0] and (not fed[in_net] or parts.gen_loss_all or parts.gen_loss)) then
       units[#units + 1] = unit
     end
   end
@@ -242,44 +255,41 @@ local function pop_dirty()
   return found
 end
 
----@return UnitNumber?
-local function pop_safety()
-  local queue = storage.line_loss_queue
-  if #queue == 0 then
-    for unit in pairs(storage.transformers) do queue[#queue + 1] = unit end
-    table.sort(queue, function(a, b) return a > b end)  -- popped from the end: ascending
-  end
-  return table.remove(queue)
-end
-
+-- A search from a transformer: "out" over its downstream network from its
+-- output pole, or "gen" over its upstream generator network from its input
+-- pole. Both settle poles the same way (step_job); they differ in what they
+-- record per pole and how they finish.
 ---@param unit UnitNumber
----@param urgent boolean
+---@param kind "out"|"gen"
 ---@return table?
-local function new_job(unit, urgent)
-  local transformer_parts = storage.transformers[unit]
-  local pole_out = transformer_parts and transformer_parts.pole_out
-  if not (pole_out and pole_out.valid) then return nil end
+local function new_job(unit, kind)
+  local parts = storage.transformers[unit]
+  local start = parts and (kind == "gen" and parts.pole_in or parts.pole_out)
+  if not (start and start.valid) then return nil end
   local job = {
-    kind = "out",
+    kind = kind,
     transformer = unit,
-    urgent = urgent,
-    start = pole_out.unit_number,
+    urgent = true,  -- (saves before 0.1.5 also had background searches)
+    start = start.unit_number,
     heap = {},
-    dist = {[pole_out.unit_number] = 0},
+    dist = {[start.unit_number] = 0},
     done = {},
-    sum = 0,
-    sum_loss = 0,
-    per_tile = storage.settings.per_tile,
-    count = 0,
-    sinks = {},
     -- Settled poles and their distances (pole ownership, heatmap)
     settled = {},
   }
-  if storage.settings.machine_weighting then
-    job.machine_names = line_loss_consumer_names(pole_out)
-    job.seen_machines = {}
+  if kind == "gen" then
+    job.seen_generators = {}
+    job.gens = {}  -- generator unit -> {distance, rated output}
+  else
+    job.sum, job.sum_loss, job.count = 0, 0, 0
+    job.per_tile = storage.settings.per_tile
+    job.sinks = {}
+    if storage.settings.machine_weighting then
+      job.machine_names = line_loss_consumer_names(start)
+      job.seen_machines = {}
+    end
   end
-  heap_push(job.heap, {0, pole_out.unit_number, pole_out})
+  heap_push(job.heap, {0, start.unit_number, start})
   return job
 end
 
@@ -351,6 +361,152 @@ local function supply_distance(pole, name)
   end
   supply_cache[key] = v
   return v
+end
+
+-- Wire graph -------------------------------------------------------------------
+-- storage.wire_graph[pole unit] = {e = pole, n = name, h = hidden, reach =
+-- supply area distance, adj = {unit, entity, cost, ...} (pole neighbours, wire
+-- cost = length x mean resistance), ids = unit numbers of every wire owner, in
+-- the game's order}. Built the first time a search meets the pole, so a
+-- search reads one value per pole (valid) instead of its wires. Kept in step
+-- by the build/removal events (a pole and its neighbours are dropped) and by
+-- the sweep. The sweep compares each pole's number of wires with the game (a
+-- wire added or removed changes it at both ends); a slower second pass
+-- compares every wire's far end, for swaps that keep the counts.
+
+---@param pole LuaEntity
+local function build_node(pole)
+  local name = pole.name
+  local info = info_of(name)
+  local adj, ids = {}, {}
+  local node = {e = pole, n = name, h = info.hidden, reach = info.hidden and 0 or supply_distance(pole, name), adj = adj, ids = ids}
+  local connector = pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
+  if connector then
+    local r1 = info.r
+    local p1 = pole.position
+    for _, connection in pairs(connector.connections) do
+      local other = connection.target.owner
+      local other_unit = other.unit_number
+      ids[#ids + 1] = other_unit or 0
+      local other_info = info_of(other.name)
+      if other_info.pole and other_unit then
+        local p2 = other.position
+        local dx, dy = p2.x - p1.x, p2.y - p1.y
+        local n = #adj
+        adj[n + 1] = other_unit
+        adj[n + 2] = other
+        adj[n + 3] = math.sqrt(dx * dx + dy * dy) * 0.5 * (r1 + other_info.r)
+      end
+    end
+  end
+  return node
+end
+
+---@param pole LuaEntity  valid
+---@param unit_number UnitNumber
+local function node_of(pole, unit_number)
+  local graph = storage.wire_graph
+  local node = graph[unit_number]
+  if not node then
+    node = build_node(pole)
+    graph[unit_number] = node
+  end
+  return node
+end
+
+-- LuaWireConnector.connection_count, when this game version has it
+local has_connection_count
+local function connection_count(connector)
+  if has_connection_count == nil then
+    has_connection_count = pcall(function() return connector.connection_count end)
+  end
+  if has_connection_count then return connector.connection_count end
+  return #connector.connections
+end
+
+-- Does the cached wire list still match the game? Quick: the number of wires
+local function node_matches(node, pole, full)
+  local connector = pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
+  local ids = node.ids
+  if not connector then return #ids == 0 end
+  if not full then return connection_count(connector) == #ids end
+  local connections = connector.connections
+  if #connections ~= #ids then return false end
+  for x = 1, #connections do
+    if (connections[x].target.owner.unit_number or 0) ~= ids[x] then return false end
+  end
+  return true
+end
+
+-- A pole was built or is about to be removed: drop it and its neighbours
+---@param pole LuaEntity
+function wire_graph_pole_changed(pole)
+  local graph = storage.wire_graph
+  if not graph then return end
+  local unit_number = pole.unit_number
+  if unit_number then graph[unit_number] = nil end
+  local connector = pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
+  if connector then
+    for _, connection in pairs(connector.connections) do
+      local other_unit = connection.target.owner.unit_number
+      if other_unit then graph[other_unit] = nil end
+    end
+  end
+end
+
+-- Drops the cached neighbours in a wire list, so they are rebuilt too
+local function drop_neighbours(graph, adj)
+  for x = 1, #adj, 3 do graph[adj[x]] = nil end
+end
+
+-- Checks up to `budget` cached poles against the game; a pole whose wires
+-- changed is rebuilt, its old and new neighbours dropped, and its network
+-- searched again
+local function sweep_wire_graph(budget)
+  local graph = storage.wire_graph
+  local list, pos = storage.wire_sweep_list, storage.wire_sweep_pos or 1
+  if not list or pos > #list then
+    list = {}
+    for unit_number in pairs(graph) do list[#list + 1] = unit_number end
+    table.sort(list)
+    storage.wire_sweep_list, pos = list, 1
+  end
+  local n = #list
+  -- Full checks walk the same list with their own cursor
+  local full_pos = storage.wire_full_pos or 1
+  local full_budget = SWEEP_FULL_PER_TICK
+  while (budget > 0 and pos <= n) or (full_budget > 0 and n > 0) do
+    local full = false
+    local unit_number
+    if full_budget > 0 and n > 0 then
+      if full_pos > n then full_pos = 1 end
+      unit_number = list[full_pos]
+      full_pos = full_pos + 1
+      full_budget = full_budget - 1
+      full = true
+    else
+      unit_number = list[pos]
+      pos = pos + 1
+    end
+    local node = graph[unit_number]
+    if node then
+      if not full then budget = budget - 1 end
+      local pole = node.e
+      if not pole.valid then
+        -- Gone without an event
+        graph[unit_number] = nil
+        drop_neighbours(graph, node.adj)
+      elseif not node_matches(node, pole, full) then
+        local new = build_node(pole)
+        drop_neighbours(graph, node.adj)
+        drop_neighbours(graph, new.adj)
+        graph[unit_number] = new
+        mark_line_loss_network(pole.electric_network_id)
+      end
+    end
+  end
+  storage.wire_sweep_pos = pos
+  storage.wire_full_pos = full_pos
 end
 
 -- Rated output of the generators in a pole's supply area, each generator
@@ -483,27 +639,32 @@ local function add_types(types, counts, d)
   end
 end
 
----@param unit UnitNumber
----@param urgent boolean
----@return table?
-local function new_generator_job(unit, urgent)
-  local parts = storage.transformers[unit]
-  local pole_in = parts and parts.pole_in
-  if not (pole_in and pole_in.valid) then return nil end
-  local job = {
-    kind = "gen",
-    transformer = unit,
-    urgent = urgent,
-    start = pole_in.unit_number,
-    heap = {},
-    dist = {[pole_in.unit_number] = 0},
-    done = {},
-    settled = {},
-    seen_generators = {},
-    gens = {},  -- generator unit -> {distance, rated output}
-  }
-  heap_push(job.heap, {0, pole_in.unit_number, pole_in})
-  return job
+
+-- Balancing --------------------------------------------------------------------
+local TINY = 1e-9  -- below this a sum is treated as zero (avoids 0 * inf = NaN)
+
+-- Sinkhorn scaling on a sparse kernel, shared by transformer networks and
+-- generator networks: adjusts a (per source) and b (per sink) so that the
+-- flows f_ij = a_i K_ij b_j add up to supply_i for each source and demand_j
+-- for each sink. Row i lists its sinks (row_j) and kernel values (row_v);
+-- column j its sources (col_i, col_v). a and b are updated in place (warm
+-- start when they come from the previous solve).
+local function sinkhorn(row_j, row_v, col_i, col_v, supply, demand, a, b, iterations)
+  local n_sources, n_sinks = #supply, #demand
+  for _ = 1, iterations do
+    for i = 1, n_sources do
+      local rj, rv, s = row_j[i], row_v[i], 0
+      for x = 1, #rj do s = s + rv[x] * b[rj[x]] end
+      local v = s > TINY and supply[i] / s or 0
+      a[i] = (v == v and v < math.huge) and v or 0
+    end
+    for j = 1, n_sinks do
+      local ci, cv, s = col_i[j], col_v[j], 0
+      for x = 1, #ci do s = s + cv[x] * a[ci[x]] end
+      local v = s > TINY and demand[j] / s or 0
+      b[j] = (v == v and v < math.huge) and v or 0
+    end
+  end
 end
 
 -- Pairing generators with transformers ----------------------------------------
@@ -687,23 +848,23 @@ function update_generator_flows(tick)
         end
         supply[i] = total_demand * transformers[owner].gen_own_w / total_w
       end
+      local row_j, row_v, col_i, col_v = {}, {}, {}, {}
+      for j = 1, #sinks do col_i[j], col_v[j] = {}, {} end
+      for i = 1, #sources do
+        row_j[i], row_v[i] = {}, {}
+        for j = 1, #sinks do
+          local k = K[i][j]
+          if k > 0 then
+            row_j[i][#row_j[i] + 1], row_v[i][#row_v[i] + 1] = j, k
+            col_i[j][#col_i[j] + 1], col_v[j][#col_v[j] + 1] = i, k
+          end
+        end
+      end
       local a, b = {}, {}
       for i = 1, #sources do a[i] = 1 end
       for j = 1, #sinks do b[j] = 1 end
-      for _ = 1, 20 do  -- few transformers per generator network: always a full solve
-        for i = 1, #sources do
-          local sum = 0
-          for j = 1, #sinks do sum = sum + K[i][j] * b[j] end
-          local v = sum > 1e-9 and supply[i] / sum or 0
-          a[i] = (v == v and v < math.huge) and v or 0
-        end
-        for j = 1, #sinks do
-          local sum = 0
-          for i = 1, #sources do sum = sum + K[i][j] * a[i] end
-          local v = sum > 1e-9 and demand[j] / sum or 0
-          b[j] = (v == v and v < math.huge) and v or 0
-        end
-      end
+      -- Few transformers per generator network: always a full solve
+      sinkhorn(row_j, row_v, col_i, col_v, supply, demand, a, b, 20)
       for j, unit in ipairs(sinks) do
         local total, wloss, wd = 0, 0, 0
         for i, owner in ipairs(sources) do
@@ -748,6 +909,7 @@ local function finish_generator_job(job)
   local count = 0
   for _ in pairs(job.gens) do count = count + 1 end
   parts.gen_count = count  -- generators found on its upstream network (panel)
+  set_generator_consumer(parts, true)
   generator_ownership_apply(job.transformer, job.gens)
   if storage.heatmap then heatmap_apply(-job.transformer, job.settled) end
 end
@@ -759,6 +921,7 @@ local function clear_generator_loss(unit)
   if parts and (parts.gen_loss_all or parts.gen_loss) then
     parts.gen_loss, parts.gen_distance = nil, nil
     parts.gen_loss_all, parts.gen_distance_all, parts.gen_network = nil, nil, nil
+    set_generator_consumer(parts, false)
     generator_ownership_forget(unit)
     heatmap_forget_source(-unit)
   end
@@ -820,17 +983,17 @@ local function step_job(job, budget, tick)
     if not done[unit_number] and pole.valid then
       done[unit_number] = true
       budget = budget - 1
-      local name = pole.name
-      local info = info_of(name)
-      local hidden = info.hidden
+      local node = node_of(pole, unit_number)
+      local name = node.n
+      local hidden = node.h
       if job.kind == "gen" then
         if not hidden then
-          job.settled[#job.settled + 1] = {pole, d, generator_weight(pole, job, d, supply_distance(pole, name))}
+          job.settled[#job.settled + 1] = {pole, d, generator_weight(pole, job, d, node.reach)}
         end
       elseif not hidden then
         -- Machines are spread only over poles that can power them: big poles,
         -- huge poles and fuses have no supply area, so they only carry power
-        local reach = supply_distance(pole, name)
+        local reach = node.reach
         local supplies = reach > 0
         if supplies then
           job.sum = job.sum + d
@@ -849,26 +1012,15 @@ local function step_job(job, budget, tick)
       -- Hidden poles (other transformers' inputs, alt-surface poles) are
       -- endpoints: the network does not continue through them.
       if unit_number == job.start or not hidden then
-        local connector = pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
-        if connector then
-          local r1 = info.r
-          local p1 = pole.position
-          for _, connection in pairs(connector.connections) do
-            local other = connection.target.owner
-            local other_info = info_of(other.name)
-            if other_info.pole then
-              local other_unit_number = other.unit_number
-              if not done[other_unit_number] then
-                local p2 = other.position
-                local dx, dy = p2.x - p1.x, p2.y - p1.y
-                local weight = math.sqrt(dx * dx + dy * dy) * 0.5 * (r1 + other_info.r)
-                local new_d = d + weight
-                local best = dist[other_unit_number]
-                if not best or new_d < best then
-                  dist[other_unit_number] = new_d
-                  heap_push(heap, {new_d, other_unit_number, other})
-                end
-              end
+        local adj = node.adj
+        for x = 1, #adj, 3 do
+          local other_unit_number = adj[x]
+          if not done[other_unit_number] then
+            local new_d = d + adj[x + 2]
+            local best = dist[other_unit_number]
+            if not best or new_d < best then
+              dist[other_unit_number] = new_d
+              heap_push(heap, {new_d, other_unit_number, adj[x + 1]})
             end
           end
         end
@@ -897,6 +1049,7 @@ function update_line_losses(tick)
     storage.pole_dist, storage.source_reach = {}, {}
     mark_all_line_loss_dirty()
   end
+  if not storage.wire_graph then storage.wire_graph = {} end
   if tick % FLOW_INTERVAL == 0 and storage.settings.closeness then
     update_closeness_flows(tick)
     update_generator_flows(tick)
@@ -904,27 +1057,23 @@ function update_line_losses(tick)
   resolve_pending_networks()
 
   local job = storage.line_loss_job
-  local has_dirty = #storage.line_loss_dirty_list > 0
-  if job and not job.urgent and has_dirty then
-    -- A change is waiting: put the safety search back and do that first
-    table.insert(storage.line_loss_queue, 1, job.transformer)
+  if job and not job.urgent then
+    -- A background search from before 0.1.5: start over from the queue
     job = nil
     storage.line_loss_job = nil
   end
-  local urgent = has_dirty or (job and job.urgent)
-  local budget = urgent and POLES_PER_TICK or SAFETY_POLES_PER_TICK
+  if not job and #storage.line_loss_dirty_list == 0 then
+    sweep_wire_graph(SWEEP_POLES_PER_TICK)
+    return
+  end
+  local budget = POLES_PER_TICK
   -- Bounded so that a run of transformers with tiny networks cannot spin
   local starts = 0
   while budget > 0 and starts < 10 do
     if not job then
       local unit = pop_dirty()
-      if unit then
-        job = new_job(unit, true)
-      else
-        unit = pop_safety()
-        if not unit then return end
-        job = new_job(unit, false)
-      end
+      if not unit then return end
+      job = new_job(unit, "out")
       starts = starts + 1
       storage.line_loss_job = job
     end
@@ -939,7 +1088,7 @@ function update_line_losses(tick)
         if finished.kind == "out" then
           local parts = storage.transformers[finished.transformer]
           if parts and on_generator_network(parts) then
-            job = new_generator_job(finished.transformer, finished.urgent)
+            job = new_job(finished.transformer, "gen")
             storage.line_loss_job = job
           else
             clear_generator_loss(finished.transformer)
@@ -1223,7 +1372,6 @@ local WARM_ITERATIONS = 3
 -- each consumer its NEAREST_SOURCES nearest sources (so none is left unfed).
 -- Under 1/d the far pairs carry little power anyway; dropping them keeps the
 -- cost proportional to (sources + consumers) instead of their product.
-local TINY = 1e-9  -- below this a sum is treated as zero (avoids 0 * inf = NaN)
 local NEAREST_SINKS = 8
 local NEAREST_SOURCES = 3
 local REST = "rest"
@@ -1485,20 +1633,7 @@ function update_closeness_flows(tick)
         b[j] = v or 1
       end
 
-      for _ = 1, warm and WARM_ITERATIONS or COLD_ITERATIONS do
-        for i = 1, n_sources do
-          local rj, rv, s = row_j[i], row_v[i], 0
-          for x = 1, #rj do s = s + rv[x] * b[rj[x]] end
-          local v = s > TINY and supply[i] / s or 0
-          a[i] = (v == v and v < math.huge) and v or 0
-        end
-        for j = 1, n_sinks do
-          local ci, cv, s = col_i[j], col_v[j], 0
-          for x = 1, #ci do s = s + cv[x] * a[ci[x]] end
-          local v = s > TINY and demand[j] / s or 0
-          b[j] = (v == v and v < math.huge) and v or 0
-        end
-      end
+      sinkhorn(row_j, row_v, col_i, col_v, supply, demand, a, b, warm and WARM_ITERATIONS or COLD_ITERATIONS)
 
       -- Flows, each source's D, and the factors for the next warm start
       local a_by, b_by = {}, {}
@@ -1815,8 +1950,16 @@ end
 line_loss_search = {
   info_of = function(name) return info_of(name) end,
   supply_distance = function(pole, name) return supply_distance(pole, name) end,
+  node_of = function(pole, unit_number) return node_of(pole, unit_number) end,
   generator_types = function(surface) return generator_types(surface) end,
   rated_output = function(entity) return rated_output(entity) end,
+  is_generator = function(entity)
+    local entity_type = entity.type
+    for _, t in pairs(generator_types(entity.surface)) do
+      if t == entity_type then return true end
+    end
+    return false
+  end,
   heap_push = function(heap, item) return heap_push(heap, item) end,
   heap_pop = function(heap) return heap_pop(heap) end,
 }

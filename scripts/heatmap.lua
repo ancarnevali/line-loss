@@ -15,8 +15,10 @@
 -- Map view only, per player, toggled with the "Toggle line-loss map"
 -- shortcut (off by default). Data is kept only while someone has it on: the
 -- searches hand over the poles they settle (line-losses.lua), and the sizes
--- are recomputed every UPDATE_INTERVAL ticks from pole ownership. Turning it
--- on re-runs every search, so the map fills in within a few seconds.
+-- are recomputed over every UPDATE_INTERVAL ticks from pole ownership, a
+-- slice of the poles per tick; a dot is touched only when its colour or size
+-- changes. Turning it on re-runs every search, so the map fills in within a
+-- few seconds.
 
 local SHORTCUT = "line-loss-toggle-heatmap"
 local UPDATE_INTERVAL = 60
@@ -60,6 +62,22 @@ local function destroy(id)
   if object and object.valid then object.destroy() end
 end
 
+-- A dot's render object (kept on the entry; saves before 0.1.5 kept its id)
+local function dot_of(entry)
+  local object = entry.obj
+  if not object and entry.id then
+    object = rendering.get_object_by_id(entry.id)
+    entry.obj = object
+  end
+  return object
+end
+
+local function destroy_dot(entry)
+  local object = dot_of(entry)
+  if object and object.valid then object.destroy() end
+  entry.obj, entry.id = nil, nil
+end
+
 ---@return uint[] players, string key
 local function viewers()
   local list = {}
@@ -81,7 +99,7 @@ function heatmap_clear()
   clear_legacy_loss_map()
   local state = storage.heatmap
   if not state then return end
-  for _, entry in pairs(state.poles) do destroy(entry.id) end
+  for _, entry in pairs(state.poles) do destroy_dot(entry) end
   storage.heatmap = nil
 end
 
@@ -91,14 +109,21 @@ local function refresh_pole(state, unit, entry)
   for _, d in pairs(entry.sources) do
     if not best or d < best then best = d end
   end
-  if not best or not entry.pole.valid then
-    destroy(entry.id)
+  if not best then
+    destroy_dot(entry)
     state.poles[unit] = nil
     return
   end
   local step = step_for(get_route_line_loss(best))
   local bin = entry.bin or 0
-  local object = entry.id and rendering.get_object_by_id(entry.id)
+  -- Unchanged: nothing to read or write
+  if entry.step == step and entry.drawn_bin == bin and (entry.obj or entry.id) then return end
+  if not entry.pole.valid then
+    destroy_dot(entry)
+    state.poles[unit] = nil
+    return
+  end
+  local object = dot_of(entry)
   if object and object.valid then
     if entry.step ~= step then
       object.color = COLOURS[step]
@@ -109,7 +134,8 @@ local function refresh_pole(state, unit, entry)
       entry.drawn_bin = bin
     end
   else
-    entry.id = rendering.draw_circle{
+    entry.id = nil
+    entry.obj = rendering.draw_circle{
       color = COLOURS[step],
       radius = radius_for(bin),
       filled = true,
@@ -117,7 +143,7 @@ local function refresh_pole(state, unit, entry)
       surface = entry.pole.surface,
       players = state.players,
       render_mode = "chart",
-    }.id
+    }
     entry.step, entry.drawn_bin = step, bin
   end
 end
@@ -210,16 +236,31 @@ local function pole_lost(entry, per_owner, tick)
   return loss < 1 and load * loss / (1 - loss) or 0
 end
 
--- Sizes from the current loads
+-- Sizes from the current loads, a slice of the poles per tick so a round
+-- takes UPDATE_INTERVAL ticks
 ---@param tick GameTick
-local function resize(state, tick)
-  local pole_dist = storage.pole_dist or {}
-  local per_owner = {}
-  for unit, entry in pairs(state.poles) do
-    local owned = pole_dist[unit]
-    entry.bin = owned and bin_for(pole_lost(owned, per_owner, tick)) or 0
-    refresh_pole(state, unit, entry)
+local function resize_step(state, tick)
+  local list, pos = state.resize_list, state.resize_pos or 1
+  if not list or pos > #list then
+    list = {}
+    for unit in pairs(state.poles) do list[#list + 1] = unit end
+    table.sort(list)
+    state.resize_list, pos = list, 1
+    state.per_owner = {}  -- loads per owner, read once per round
   end
+  local last = math.min(#list, pos + math.ceil(#list / UPDATE_INTERVAL) - 1)
+  local pole_dist = storage.pole_dist or {}
+  local per_owner = state.per_owner
+  for x = pos, last do
+    local unit = list[x]
+    local entry = state.poles[unit]
+    if entry then
+      local owned = pole_dist[unit]
+      entry.bin = owned and bin_for(pole_lost(owned, per_owner, tick)) or 0
+      refresh_pole(state, unit, entry)
+    end
+  end
+  state.resize_pos = last + 1
 end
 
 ---@param tick GameTick
@@ -240,11 +281,10 @@ local function sync(tick)
   if state.key ~= key then
     state.players, state.key = players, key
     for _, entry in pairs(state.poles) do
-      local object = entry.id and rendering.get_object_by_id(entry.id)
+      local object = dot_of(entry)
       if object and object.valid then object.players = players end
     end
   end
-  resize(state, tick)
 end
 
 ---@param player LuaPlayer
@@ -256,7 +296,10 @@ end
 
 ---@param tick GameTick
 function update_heatmap(tick)
-  if tick % UPDATE_INTERVAL ~= 0 then return end
-  clear_legacy_loss_map()
-  sync(tick)
+  if tick % UPDATE_INTERVAL == 0 then
+    clear_legacy_loss_map()
+    sync(tick)
+  end
+  local state = storage.heatmap
+  if state then resize_step(state, tick) end
 end

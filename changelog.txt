@@ -1,4 +1,16 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.1.5
+Date: 2026-11-11
+  Optimizations:
+    - Wires cached: a search after a change reads about 90% less from the game.
+    - The background check is about 60% cheaper and spots changed wires within seconds.
+    - Building a pole searches again only the transformers feeding that network.
+    - Line-loss map and feed paths cost far less while shown.
+  Changes:
+    - Building or removing a generator updates the losses of the transformers it feeds right away.
+    - Toggling line losses or "feed nearest consumers first" searches every network again.
+    - The upstream "Line loss" consumer exists only on transformers fed straight by generators.
+---------------------------------------------------------------------------------------------------
 Version: 0.1.4
 Date: 2026-11-11
   Features:

@@ -32,15 +32,19 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
     return
   end
   if string.sub(name, 1, 10) == "line-loss-" or name == "power-overload-transformer-efficiency" then
-    local old_per_tile = storage.settings and storage.settings.per_tile
+    local old = storage.settings or {}
     read_settings()
-    if not storage.settings.enabled then
+    local new = storage.settings
+    if not new.enabled then
       reset_hover()
       grid_diagram_clear()
       heatmap_clear()
       feed_paths_clear_all()
-    elseif storage.settings.per_tile ~= old_per_tile or name == "line-loss-machine-weighting" then
-      mark_all_line_loss_dirty()  -- per-pole losses / machine counts depend on it
+    elseif not old.enabled or new.per_tile ~= old.per_tile or new.closeness ~= old.closeness
+        or new.machine_weighting ~= old.machine_weighting then
+      -- Searched again: switched back on (nothing was kept up to date while
+      -- off), per-pole losses, sharing, machine counts
+      mark_all_line_loss_dirty()
     end
   end
 end)
@@ -103,8 +107,12 @@ local function on_entity_changed(event, removed)
   if TRANSFORMER_NAMES[entity.name] then
     if not removed then register_transformer(entity) end
   elseif entity.type == "electric-pole" then
+    wire_graph_pole_changed(entity)
     mark_line_loss_network(entity.electric_network_id)
-  elseif storage.settings and storage.settings.machine_weighting and entity.type ~= "entity-ghost" then
+  elseif entity.type ~= "entity-ghost" and ((storage.settings and storage.settings.machine_weighting)
+      or line_loss_search.is_generator(entity)) then
+    -- Generators weight their network's generator search; machines, with
+    -- machine weighting on, the poles powering them
     mark_line_loss_network(network_of(entity))
   end
 end

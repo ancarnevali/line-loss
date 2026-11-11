@@ -19,7 +19,7 @@
 local SHORTCUT = "line-loss-toggle-feed-paths"
 local POLES_PER_TICK = 300
 local REFRESH_INTERVAL = 300
-local PO_OVERLAY_INTERVAL = 60
+local PO_OVERLAY_INTERVAL = 300  -- new Power Overload drawings hidden within 5 s
 local MAX_GENERATOR_TARGETS = 8
 
 -- Colour by route loss, as the line-loss map
@@ -65,7 +65,10 @@ end
 -- Its map lines and dots (chart-mode lines and circles it draws). Hidden for
 -- the players with feed paths on by narrowing the objects' player list, and
 -- given back to everyone when nobody has them on. Its texts (network names,
--- pole readouts) are left alone.
+-- pole readouts) are left alone. Objects already handled for the current set
+-- of players are skipped after reading their id (st.po_hidden), so a check
+-- costs one read per object unless Power Overload drew something new or a
+-- player toggled the view.
 local function apply_po_overlay(st)
   local hiders, viewers = {}, {}
   for _, player in pairs(game.connected_players) do
@@ -75,32 +78,47 @@ local function apply_po_overlay(st)
       viewers[#viewers + 1] = player.index
     end
   end
+  local key = table.concat(hiders, ",") .. "|" .. table.concat(viewers, ",")
+  if #hiders == 0 and next(st.po_hidden) == nil then
+    st.po_key = key
+    return
+  end
+  if st.po_key ~= key then
+    -- Someone toggled: every object is handled again
+    st.po_key = key
+    st.po_handled = {}
+  end
+  st.po_handled = st.po_handled or {}
+  local handled = st.po_handled
   local ok, objects = pcall(rendering.get_all_objects, "PowerOverload")
   if not ok or not objects then return end
   for _, object in pairs(objects) do
-    if object.valid and object.render_mode == "chart" and (object.type == "line" or object.type == "circle") then
-      local id = object.id
-      if #hiders == 0 then
-        if st.po_hidden[id] then
-          pcall(function()
-            object.visible = true
-            object.players = {}
-          end)
-        end
-      else
-        pcall(function()
-          if #viewers == 0 then
-            object.visible = false
-          else
-            object.visible = true
-            object.players = viewers
+    local id = object.id
+    if not handled[id] then
+      handled[id] = true
+      if object.valid and object.render_mode == "chart" and (object.type == "line" or object.type == "circle") then
+        if #hiders == 0 then
+          if st.po_hidden[id] then
+            pcall(function()
+              object.visible = true
+              object.players = {}
+            end)
           end
-        end)
-        st.po_hidden[id] = true
+        else
+          pcall(function()
+            if #viewers == 0 then
+              object.visible = false
+            else
+              object.visible = true
+              object.players = viewers
+            end
+          end)
+          st.po_hidden[id] = true
+        end
       end
     end
   end
-  if #hiders == 0 then st.po_hidden = {} end
+  if #hiders == 0 then st.po_hidden, st.po_handled = {}, {} end
 end
 
 -- Search ---------------------------------------------------------------------------
@@ -135,8 +153,8 @@ local function new_job(player_index, unit)
 end
 
 -- Rated generator output in a pole's supply area, each generator counted once
-local function generator_output(job, pole, name)
-  local r = line_loss_search.supply_distance(pole, name)
+---@param r number  the pole's supply area distance
+local function generator_output(job, pole, r)
   if r <= 0 then return 0 end
   local p = pole.position
   local found = pole.surface.find_entities_filtered{
@@ -156,7 +174,7 @@ end
 
 ---@return boolean finished
 local function step(job, budget)
-  local info_of = line_loss_search.info_of
+  local node_of = line_loss_search.node_of
   local heap, dist, done = job.heap, job.dist, job.done
   while budget > 0 and #heap > 0 do
     local item = line_loss_search.heap_pop(heap)
@@ -165,36 +183,26 @@ local function step(job, budget)
       done[unit_number] = true
       job.poles[unit_number] = pole
       budget = budget - 1
-      local name = pole.name
-      local info = info_of(name)
+      local node = node_of(pole, unit_number)
       if job.targets[unit_number] then
         job.remaining = job.remaining - 1
         if job.remaining <= 0 then return true end
       end
-      if job.generators and not info.hidden then
-        local w = generator_output(job, pole, name)
+      if job.generators and not node.h then
+        local w = generator_output(job, pole, node.reach)
         if w > 0 then job.generators.poles[#job.generators.poles + 1] = {unit = unit_number, w = w} end
       end
-      if unit_number == job.start or not info.hidden then
-        local connector = pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
-        if connector then
-          local p1 = pole.position
-          for _, connection in pairs(connector.connections) do
-            local other = connection.target.owner
-            local other_info = info_of(other.name)
-            if other_info.pole then
-              local other_unit = other.unit_number
-              if not done[other_unit] then
-                local p2 = other.position
-                local dx, dy = p2.x - p1.x, p2.y - p1.y
-                local new_d = d + math.sqrt(dx * dx + dy * dy) * 0.5 * (info.r + other_info.r)
-                local best = dist[other_unit]
-                if not best or new_d < best then
-                  dist[other_unit] = new_d
-                  job.prev[other_unit] = unit_number
-                  line_loss_search.heap_push(heap, {new_d, other_unit, other})
-                end
-              end
+      if unit_number == job.start or not node.h then
+        local adj = node.adj
+        for x = 1, #adj, 3 do
+          local other_unit = adj[x]
+          if not done[other_unit] then
+            local new_d = d + adj[x + 2]
+            local best = dist[other_unit]
+            if not best or new_d < best then
+              dist[other_unit] = new_d
+              job.prev[other_unit] = unit_number
+              line_loss_search.heap_push(heap, {new_d, other_unit, adj[x + 1]})
             end
           end
         end
