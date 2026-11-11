@@ -8,8 +8,9 @@
 --   colour = line loss on the route: green < 10%, yellow < 50%, red above;
 --            grey when no power flows
 --   label  = "power · loss LL" at the midpoint
--- A diamond marks each receiving transformer, coloured by the line loss of
--- all the power arriving at it (power-weighted over its feeders).
+-- A diamond marks each receiving transformer, coloured by its total
+-- upstream loss (line loss of every segment plus every transformer's losses
+-- between the generators and it).
 -- A panel (left edge of the screen, draggable) shows the grid's energy balance, averaged over the last 5 s:
 -- generated power, power reaching machines, and power lost, split into
 -- transformers (inefficiency and core loss) and line losses, each also as %
@@ -177,7 +178,7 @@ local function update_panel(player, balance, worst)
     panel.add{type = "label", caption = {"line-loss-grid.measuring"}}
     return
   end
-  local format = shared.format_energy_number
+  local format = ratings.format_power
   local g = balance.generated
   panel.add{type = "label", caption = {"line-loss-grid.generated", format(g)}}
   panel.add{type = "label", caption = {"line-loss-grid.delivered", format(balance.delivered), percent_of(balance.delivered, g)}}
@@ -194,7 +195,7 @@ local function update_panel(player, balance, worst)
       type = "button",
       caption = {"line-loss-grid.show"},
       tooltip = {"line-loss-grid.show-tooltip"},
-      tags = {line_loss_goto = true, x = route.x, y = route.y, surface = route.surface},
+      tags = {line_loss_goto = true, x = route.x, y = route.y, surface = route.surface, ends = route.ends},
     }
     row.add{type = "label", caption = {"line-loss-grid.worst-route", i,
       format(route.lost), string.format("%.1f", route.loss * 100), string.format("%d", math.floor(route.d + 0.5))},
@@ -202,7 +203,35 @@ local function update_panel(player, balance, worst)
   end
 end
 
--- "Show" button: open the map at the route's midpoint
+local HIGHLIGHT_TICKS = 600  -- how long the circles of a shown route stay
+local HIGHLIGHT_COLOUR = {r = 1, g = 0, b = 0}
+
+-- Red circles around a route's source and sink, for this player only: one
+-- drawn in the world, one on the map view. The previous route's circles go.
+local function highlight_route(player, surface, ends)
+  storage.route_highlights = storage.route_highlights or {}
+  for _, id in pairs(storage.route_highlights[player.index] or {}) do destroy(id) end
+  local ids = {}
+  for _, p in pairs(ends or {}) do
+    local position = {x = p[1], y = p[2]}
+    for _, mode in pairs({"game", "chart"}) do
+      ids[#ids + 1] = rendering.draw_circle{
+        color = HIGHLIGHT_COLOUR,
+        radius = mode == "game" and 3 or 6,
+        width = mode == "game" and 4 or 6,
+        filled = false,
+        target = position,
+        surface = surface,
+        players = {player},
+        time_to_live = HIGHLIGHT_TICKS,
+        render_mode = mode,
+      }.id
+    end
+  end
+  storage.route_highlights[player.index] = ids
+end
+
+-- "Show" button: open the map at the route's midpoint and circle its ends
 ---@param element LuaGuiElement
 ---@param player LuaPlayer
 function grid_diagram_on_click(element, player)
@@ -211,6 +240,7 @@ function grid_diagram_on_click(element, player)
   local surface = game.get_surface(tags.surface)
   if not surface then return end
   local position = {x = tags.x, y = tags.y}
+  highlight_route(player, surface, tags.ends)
   local ok = pcall(function()
     player.set_controller{type = defines.controllers.remote, position = position, surface = surface}
   end)
@@ -336,10 +366,11 @@ function update_grid_diagram(tick, force)
               lost = lost, loss = loss, d = sink.d, unit = key,
               x = (from.x + to.x) / 2, y = (from.y + to.y) / 2,
               surface = source_entity.surface.index,
+              ends = {{from.x, from.y}, {to.x, to.y}},  -- source and sink, circled by Show
             }
           end
           local width = width_for(power)
-          local text = shared.format_energy_number(power) .. " · " .. string.format("%.1f", loss * 100) .. "% LL"
+          local text = ratings.format_power(power) .. " · " .. string.format("%.1f", loss * 100) .. "% LL"
 
           local route = state.routes[key]
           if route and not (rendering.get_object_by_id(route.line) or {}).valid then
@@ -418,11 +449,12 @@ function update_grid_diagram(tick, force)
     end
   end
 
-  -- One diamond per receiving transformer, coloured by the line loss of all
-  -- the power arriving at it (power-weighted over its feeders)
+  -- One diamond per receiving transformer, coloured by its total
+  -- upstream loss: everything lost between the generators and it (the same
+  -- value the hover shows by default).
   state.diamonds = state.diamonds or {}
   for unit, entity in pairs(receivers) do
-    local loss = get_upstream_line_loss(unit) or 0
+    local loss = get_cumulative_upstream_loss(unit) or 0
     local receiver_parts = transformers[unit]
     local band = band_for(receiver_parts and receiver_parts.p_draw or 0, loss)
     local diamond = state.diamonds[unit]
@@ -467,6 +499,7 @@ function update_grid_diagram(tick, force)
       worst[#worst + 1] = {
         lost = parts.gen_burn, loss = gen_loss or 0, d = gen_d or 0, unit = "gen>" .. unit,
         x = p.x, y = p.y, surface = entity.surface.index,
+        ends = {{p.x, p.y}},  -- generators are many: circle the transformer only
       }
     end
   end

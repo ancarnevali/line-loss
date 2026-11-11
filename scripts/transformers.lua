@@ -86,25 +86,29 @@ local function pole_rating(pole)
 end
 
 ---@param hidden_pole LuaEntity?
----@return number?  highest rating among the real poles wired to it
+---@return number?, string?  highest rating among the real poles wired to it, and that pole's name
 local function side_rating(hidden_pole)
   if not (hidden_pole and hidden_pole.valid) then return nil end
   local connector = hidden_pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
   if not connector then return nil end
-  local best
+  local best, best_name
   for _, connection in pairs(connector.connections) do
     local other = connection.target.owner
     if other.valid and other.type == "electric-pole" and string.sub(other.name, 1, 10) ~= "po-hidden-" then
       local w = pole_rating(other)
-      if w and (not best or w > best) then best = w end
+      if w and (not best or w > best) then best, best_name = w, other.name end
     end
   end
-  return best
+  return best, best_name
 end
 
 ---@param parts LineLossTransformer
 local function update_rating(parts)
-  local r_in, r_out = side_rating(parts.pole_in), side_rating(parts.pole_out)
+  local r_in, name_in = side_rating(parts.pole_in)
+  local r_out, name_out = side_rating(parts.pole_out)
+  -- for the panel's core-loss tooltip
+  parts.rating_in = r_in and {w = r_in, name = name_in} or nil
+  parts.rating_out = r_out and {w = r_out, name = name_out} or nil
   if r_in and r_out then
     parts.rating = math.min(r_in, r_out)
   else
@@ -239,7 +243,12 @@ function unregister_transformer(unit)
     if entity and entity.valid then entity.destroy() end
   end
   storage.transformers[unit] = nil
-  if storage.line_loss_feeders then storage.line_loss_feeders[unit] = nil end
+  local feeders = storage.line_loss_feeders
+  if feeders then
+    -- No longer a consumer, and no longer a feeder of anything
+    feeders[unit] = nil
+    for _, f in pairs(feeders) do f[unit] = nil end
+  end
   -- The transformers that fed it lose a consumer
   invalidate_line_loss_inputs()
   mark_line_loss_network(parts.in_net)

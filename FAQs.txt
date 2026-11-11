@@ -38,8 +38,8 @@ A: A route loses "Line loss per tile" (default 0.025%) times its distance, cappe
    output. The routes are:
      - downstream transformers count with the power they actually draw;
      - machines (anything powered directly by the network: assemblers, lamps, accumulators
-       charging...) are spread over the network's poles that can power them (huge poles and fuses
-       have no supply area, so they carry power without counting), because the game does not say
+       charging...) are spread over the network's poles that can power them (huge poles, big transmission
+       poles and fuses have no supply area, so they carry power without counting), because the game does not say
        which pole powers which machine.
    Example: 100 tiles of big poles lose 2.5%; the same run on small poles about 14%.
 
@@ -50,10 +50,17 @@ A: Each transformer gets two hidden consumers, listed by name in the electric ne
                        drawn x (1 - e) / e, plus its core loss.
    A transformer fed directly by generators gets a second "Line loss" consumer, on that generator
    network, for the wires between the generators and the transformer.
-   The transformer panel (open a transformer) shows its upstream line loss twice, for the last
-   segment and compounded from the generators down, then its downstream line loss, its inefficiency
-   and its core loss. Every line has a tooltip defining it.
-   Hovering a transformer shows the power it draws and the line loss of the last segment.
+   A segment is the wires between two transformers, or between the generators and a transformer.
+   The transformer panel (open a transformer) has two sections. Upstream: the line loss of the
+   last segment, and the total upstream loss (line loss in every segment plus the
+   inefficiency and core loss of every transformer between the generators and this one), split
+   into those three parts, as shares of the power generated for it. Downstream: its input, minus
+   the line loss of the next segment, its inefficiency and its core loss, equals its output, and
+   the total loss, as shares of its input. Every row has a tooltip with the live figures.
+   Hovering a transformer shows the power it draws and, by default, "Loss upstream" (the total
+   upstream loss). Under "Hover information" in its panel you can add "Loss downstream" (the line
+   loss of the next segment) or turn either off, for that transformer.
+   On the grid diagram, each diamond is coloured by that transformer's total upstream loss.
 
 Q: What is the core loss?
 A: A switched-on transformer loses a constant 0.1% of its rating (setting), even with no load, like
@@ -218,3 +225,9 @@ A: Distances are only searched again when a network changes (a pole built or rem
    merged or split, a transformer added or removed), at up to 100 poles per tick, plus a slow
    background pass of 10 poles per tick. Power is measured once a second. To check the cost on your
    save, enable "show-time-usage" in the debug settings (F4).
+
+Q: What is the big transmission pole?
+A: A big electric pole with no supply area. It has the same reach, recipe and rating (300 MW) as
+   the big pole, and the same line resistance, but it powers nothing around it: use it for long
+   lines that pass by factories or ore fields without feeding them. Machine load is never spread
+   over it. It is unlocked with the big electric pole and can replace one directly.

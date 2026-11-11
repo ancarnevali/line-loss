@@ -39,8 +39,14 @@ local function consumer(name)
   return prototype
 end
 
+local line_consumer = consumer("line-loss-line-consumer")
+-- Shown with the big pole's icon in the electric network statistics, so line
+-- losses are easy to tell apart from the transformer's own losses
+line_consumer.icons = {{icon = "__base__/graphics/icons/big-electric-pole.png", icon_size = 64}}
+line_consumer.icon = nil
+
 data:extend{
-  consumer("line-loss-line-consumer"),
+  line_consumer,
   consumer("line-loss-ineff-consumer"),
 }
 
@@ -50,6 +56,7 @@ data:extend{
   {
     type = "shortcut",
     name = "line-loss-toggle-grid-diagram",
+    localised_description = {"shortcut-description.line-loss-toggle-grid-diagram"},
     action = "lua",
     associated_control_input = "line-loss-toggle-grid-diagram",
     toggleable = true,
@@ -73,6 +80,27 @@ data:extend{
     small_icon_size = 24,
   },
   {
+    type = "shortcut",
+    name = "line-loss-toggle-feed-paths",
+    localised_description = {"shortcut-description.line-loss-toggle-feed-paths"},
+    action = "lua",
+    associated_control_input = "line-loss-toggle-feed-paths",
+    toggleable = true,
+    order = "c[toggles]-h[grid-paths]",
+    icon = "__line-loss__/graphics/shortcuts/feed-paths-x32.png",
+    icon_size = 32,
+    small_icon = "__line-loss__/graphics/shortcuts/feed-paths-x24.png",
+    small_icon_size = 24,
+  },
+  {
+    type = "custom-input",
+    name = "line-loss-toggle-feed-paths",
+    localised_name = {"shortcut-name.line-loss-toggle-feed-paths"},
+    key_sequence = "",
+    consuming = "none",
+    order = "e",
+  },
+  {
     type = "custom-input",
     name = "line-loss-toggle-heatmap",
     localised_name = {"shortcut-name.line-loss-toggle-heatmap"},
@@ -89,3 +117,5 @@ data:extend{
     order = "c",
   },
 }
+
+require("__line-loss__/prototypes/big-transmission-pole")

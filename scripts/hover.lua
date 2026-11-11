@@ -1,9 +1,12 @@
--- Text under a hovered transformer, two lines in one colour:
+-- Text under a hovered transformer:
 --   Drawing: <power drawn from the upstream network>
---   Line loss: <upstream line loss of the last segment>%
--- Coloured by that last-segment line loss, with the same thresholds as the
--- grid diagram's diamonds: green below 10%, yellow below 50%, red above.
--- The cumulative line loss is in the transformer panel only.
+--   Loss upstream: <total upstream loss>%       (option, on by default)
+--   Loss downstream: <line loss in the next segment>% (option, off by default)
+-- A segment is the wires between two transformers (or between the generators
+-- and a transformer). The loss values are chosen per transformer, for every
+-- player, in its panel ("Hover information"); they share the second line,
+-- each coloured by its own value: green below 10%, yellow below 50%, red
+-- above.
 -- Two text objects that keep the same size on screen at every zoom level,
 -- like Power Overload's pole readout.
 -- Both hang off the same anchor point: the first line sits on it
@@ -19,11 +22,33 @@ local REFRESH_INTERVAL = 30
 -- (its bottom edge is at 1)
 local ANCHOR_Y = 1.3
 
-local COLOURS = {
-  ok = {r = 0, g = 1, b = 0},
-  near = {r = 1, g = 1, b = 0},
-  over = {r = 1, g = 0, b = 0},
-}
+local TEXT_COLOUR = {r = 1, g = 1, b = 1}
+local RICH_COLOURS = {ok = "0,1,0", near = "1,1,0", over = "1,0,0"}
+
+local function colour_key_of(loss)
+  if loss >= 0.5 then return "over" end
+  if loss >= 0.1 then return "near" end
+  return "ok"
+end
+
+-- Per transformer, kept in its storage entry (so it goes with it):
+-- hover_up (default on) and hover_down (default off).
+---@param parts table
+---@return table  {up = boolean, down = boolean}
+function get_hover_options(parts)
+  return {up = parts.hover_up ~= false, down = parts.hover_down == true}
+end
+
+---@param unit UnitNumber
+---@param key "up"|"down"
+---@param value boolean
+function set_hover_option(unit, key, value)
+  local parts = storage.transformers[unit]
+  if not parts then return end
+  if key == "up" then parts.hover_up = value else parts.hover_down = value end
+  -- every player hovering it redraws at the next tick
+  storage.hover_selected = {}
+end
 
 -- The transformer's hidden in/out poles sit on top of it with a higher
 -- selection priority, so hovering a transformer usually selects one of them.
@@ -52,26 +77,27 @@ local function transformer_of_hidden_pole(player_index, hidden_pole)
 end
 
 ---@param transformer LuaEntity
----@return LocalisedString? line1, LocalisedString? line2, string? key, string? colour_key
+---@return LocalisedString? line1, LocalisedString? line2, string? key
 local function transformer_info(transformer)
   if not storage.settings.enabled then return nil end
   local parts = storage.transformers[transformer.unit_number]
   if not parts then return nil end
-  -- nil: not fed through another transformer (e.g. straight from generators),
-  -- so no line loss is modelled upstream of it
-  local loss = get_upstream_line_loss(transformer.unit_number) or 0
-  -- Same thresholds as the grid diagram's diamonds (grid-diagram.lua band_for)
-  local colour_key = "ok"
-  if loss >= 0.5 then
-    colour_key = "over"
-  elseif loss >= 0.1 then
-    colour_key = "near"
+  local options = get_hover_options(parts)
+  local drawing = ratings.format_power(parts.p_draw or 0)
+  local line2, key = {""}, drawing
+  local function add(locale_key, loss)
+    local value = string.format("%.1f%%", loss * 100)
+    if #line2 > 1 then line2[#line2 + 1] = "    " end
+    line2[#line2 + 1] = {"", "[color=" .. RICH_COLOURS[colour_key_of(loss)] .. "]", {locale_key, value}, "[/color]"}
+    key = key .. "|" .. locale_key .. value
   end
-  local value = string.format("%.1f", loss * 100)
-  local drawing = shared.format_energy_number(parts.p_draw or 0)
-  return {"line-loss.drawing-hover", drawing},
-    {"line-loss.line-loss-hover", value},
-    drawing .. "|" .. value, colour_key
+  if options.up then
+    add("line-loss.hover-upstream", get_cumulative_upstream_loss(transformer.unit_number) or 0)
+  end
+  if options.down then
+    add("line-loss.hover-downstream", parts.line_loss or 0)
+  end
+  return {"line-loss.drawing-hover", drawing}, line2, key
 end
 
 local function destroy(id)
@@ -112,8 +138,11 @@ local function refresh_player(player, selected)
       transformer = selected
     end
   end
-  local line1, line2, key, colour_key
-  if transformer then line1, line2, key, colour_key = transformer_info(transformer) end
+  local line1, line2, key
+  if transformer then
+    line1, line2, key = transformer_info(transformer)
+    feed_paths_set_target(player_index, transformer.unit_number)
+  end
 
   if not line1 then
     clear_player_info(player_index)
@@ -128,11 +157,6 @@ local function refresh_player(player, selected)
       object2.text = line2
       info.key = key
     end
-    if info.colour_key ~= colour_key then
-      object.color = COLOURS[colour_key]
-      object2.color = COLOURS[colour_key]
-      info.colour_key = colour_key
-    end
   else
     clear_player_info(player_index)
     local function draw(text, vertical_alignment)
@@ -140,11 +164,12 @@ local function refresh_player(player, selected)
         text = text,
         surface = transformer.surface,
         target = {entity = transformer, offset = {x = 0, y = ANCHOR_Y}},
-        color = COLOURS[colour_key],
+        color = TEXT_COLOUR,
         scale = 1.5 * player.display_scale,
         alignment = "center",
         vertical_alignment = vertical_alignment,
         scale_with_zoom = true,
+        use_rich_text = true,
         players = {player},
       }.id
     end
@@ -153,7 +178,6 @@ local function refresh_player(player, selected)
       id2 = draw(line2, "top"),
       unit_number = transformer.unit_number,
       key = key,
-      colour_key = colour_key,
     }
   end
 end

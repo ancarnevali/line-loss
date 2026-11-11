@@ -1,6 +1,6 @@
 {
   "name": "line-loss",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "title": "Line loss",
   "author": "Antonio Carnevali",
   "description": "Add-on for Power Overload. Power is lost along the wires between transformers, depending on distance and pole type.",

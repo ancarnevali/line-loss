@@ -6,6 +6,7 @@ require("__line-loss__/scripts/line-losses")
 require("__line-loss__/scripts/grid-diagram")
 require("__line-loss__/scripts/hover")
 require("__line-loss__/scripts/heatmap")
+require("__line-loss__/scripts/feed-paths")
 require("__line-loss__/scripts/transformer-panel")
 
 -- Settings -----------------------------------------------------------------------
@@ -37,6 +38,7 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
       reset_hover()
       grid_diagram_clear()
       heatmap_clear()
+      feed_paths_clear_all()
     elseif storage.settings.per_tile ~= old_per_tile or name == "line-loss-machine-weighting" then
       mark_all_line_loss_dirty()  -- per-pole losses / machine counts depend on it
     end
@@ -51,6 +53,7 @@ local function setup()
   reset_hover()
   grid_diagram_clear()
   heatmap_clear()  -- also clears the dots of the old "power lost per pole" view
+  feed_paths_clear_all()
   -- Legend window from 0.1.2 (removed)
   for _, player in pairs(game.players) do
     local legend = player.gui.screen["line-loss-map-legend"]
@@ -142,6 +145,7 @@ script.on_event(defines.events.on_tick, function(event)
   update_grid_diagram(tick)
   update_hover(tick)
   update_heatmap(tick)
+  update_feed_paths(tick)
   update_transformer_panels(tick)
 end)
 
@@ -157,11 +161,16 @@ end)
 script.on_event("line-loss-toggle-heatmap", function(event)
   toggle_heatmap(game.get_player(event.player_index), event.tick)
 end)
+script.on_event("line-loss-toggle-feed-paths", function(event)
+  toggle_feed_paths(game.get_player(event.player_index))
+end)
 script.on_event(defines.events.on_lua_shortcut, function(event)
   if event.prototype_name == "line-loss-toggle-grid-diagram" then
     toggle_grid_diagram(game.get_player(event.player_index), event.tick)
   elseif event.prototype_name == "line-loss-toggle-heatmap" then
     toggle_heatmap(game.get_player(event.player_index), event.tick)
+  elseif event.prototype_name == "line-loss-toggle-feed-paths" then
+    toggle_feed_paths(game.get_player(event.player_index))
   end
 end)
 
@@ -171,6 +180,10 @@ script.on_event(defines.events.on_gui_location_changed, function(event)
 end)
 
 -- Worst-routes list: "Show" opens the map at the route
+script.on_event(defines.events.on_gui_checked_state_changed, function(event)
+  transformer_panel_on_checked(event)
+end)
+
 script.on_event(defines.events.on_gui_click, function(event)
   local element = event.element
   if element and element.valid then grid_diagram_on_click(element, game.get_player(event.player_index)) end

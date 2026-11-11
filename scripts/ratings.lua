@@ -65,4 +65,70 @@ function ratings.make_rating_lookup(shared, startup, mods)
   end
 end
 
+-- Power for display, three significant digits at most: 503W, 47.4kW, 1.25MW.
+-- Power Overload's formatter prints every digit below 1 kW.
+local POWER_UNITS = {"W", "kW", "MW", "GW", "TW", "PW"}
+---@param watts number
+---@return string
+function ratings.format_power(watts)
+  if not (watts == watts) or watts == math.huge or watts == -math.huge then return "0W" end
+  local sign = watts < 0 and "-" or ""
+  local v, i = math.abs(watts), 1
+  while v >= 999.5 and i < #POWER_UNITS do
+    v, i = v / 1000, i + 1
+  end
+  local text
+  if v >= 99.95 then
+    text = string.format("%.0f", v)
+  elseif v >= 9.995 then
+    text = string.format("%.1f", v)
+  else
+    text = string.format("%.2f", v)
+  end
+  if text:find("%.") then text = text:gsub("0+$", ""):gsub("%.$", "") end
+  if text == "0" then sign = "" end
+  return sign .. text .. POWER_UNITS[i]
+end
+
+-- Unit for a set of figures shown together: the one that suits the largest
+-- (W = 1, kW = 2, ...)
+---@param largest number  watts
+---@return integer
+function ratings.power_unit(largest)
+  local v, i = math.abs(largest or 0), 1
+  if not (v == v) or v == math.huge then return 1 end
+  while v >= 999.5 and i < #POWER_UNITS do
+    v, i = v / 1000, i + 1
+  end
+  return i
+end
+
+-- Power in a fixed unit, so figures shown together share it: 1MW, 0.1MW,
+-- 0.326MW. Three significant digits at most, trailing zeros dropped;
+-- "<0.001MW" when a non-zero value would round to zero.
+---@param watts number
+---@param unit integer  from ratings.power_unit
+---@return string
+function ratings.format_power_in(watts, unit)
+  if not (watts == watts) or watts == math.huge or watts == -math.huge then watts = 0 end
+  local v = watts / 1000 ^ (unit - 1)
+  local a = math.abs(v)
+  local text
+  if a >= 99.95 then
+    text = string.format("%.0f", v)
+  elseif a >= 9.995 then
+    text = string.format("%.1f", v)
+  elseif a >= 0.9995 then
+    text = string.format("%.2f", v)
+  else
+    text = string.format("%.3f", v)
+  end
+  if text:find("%.") then text = text:gsub("0+$", ""):gsub("%.$", "") end
+  if text == "0" or text == "-0" then
+    if watts ~= 0 and unit > 1 then return "<0.001" .. POWER_UNITS[unit] end
+    text = "0"
+  end
+  return text .. POWER_UNITS[unit]
+end
+
 return ratings

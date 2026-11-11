@@ -1,6 +1,10 @@
 -- Distance-based line losses (distance only: the loss percentage does not
 -- grow with power).
 --
+-- A segment is the wires between two transformers, or between the generators
+-- and a transformer. A transformer's next segment is its downstream network
+-- (its line loss, charged to it); its last segment is the upstream one.
+--
 -- Each transformer gets an electrical distance D: the load-weighted
 -- shortest-path distance, along copper wires, from its output pole to the
 -- consumers of its downstream network. Each wire's length is weighted by a
@@ -741,6 +745,9 @@ local function finish_generator_job(job)
   parts.gen_loss_all = den > 0 and loss_from_ratio(num_loss / den) or 0
   parts.gen_distance_all = den > 0 and num_d / den or 0
   parts.gen_network = parts.in_net
+  local count = 0
+  for _ in pairs(job.gens) do count = count + 1 end
+  parts.gen_count = count  -- generators found on its upstream network (panel)
   generator_ownership_apply(job.transformer, job.gens)
   if storage.heatmap then heatmap_apply(-job.transformer, job.settled) end
 end
@@ -1525,6 +1532,7 @@ function update_closeness_flows(tick)
         end
         parts.line_flows = flows
         parts.line_flows_tick = tick
+        parts.line_flow_sources = n_sources
         local d = total > TINY and weighted / total
         if d and d == d and d < math.huge then parts.line_distance = d end
         local loss = total > TINY and loss_from_ratio(weighted_loss / total)
@@ -1577,72 +1585,123 @@ function loss_from_ratio(ratio)
   return ratio / (1 + ratio)
 end
 
--- Line losses compounded from the generators down to a transformer's input.
--- Only line losses: transformer inefficiency and core loss are not counted, so
--- it stays comparable with the single-stage value below. Each feeder counts
--- for the power it sends, as in get_upstream_line_loss.
+-- A source's "feed nearest consumers first" flows (consumer -> W), or nil
+-- when there are none or they are older than two balancing periods (then
+-- every use falls back to proportional sharing, as the line loss itself does)
+---@param parts table
+---@param tick GameTick
+function fresh_line_flows(parts, tick)
+  local flows = parts.line_flows
+  if flows and tick - (parts.line_flows_tick or -math.huge) <= 2 * FLOW_PERIOD then return flows end
+  return nil
+end
+
+
+-- True when at least one transformer in a feeders table still exists. A
+-- feeder removed before its own search could tidy up would otherwise hide a
+-- transformer's generator line loss.
+local function has_live_feeder(feeders)
+  if not feeders then return false end
+  local transformers = storage.transformers
+  for source in pairs(feeders) do
+    if transformers[source] then return true end
+  end
+  return false
+end
+
+-- Cumulative upstream loss: of the power generated for a transformer, the
+-- share lost before it reaches the transformer's input, over every segment
+-- (the wires between two transformers, or between the generators and a
+-- transformer) and every transformer on the way, its own losses excluded.
+-- Split by kind: line loss, inefficiency, core loss. Each feeder counts for
+-- the power it sends here, as in get_upstream_line_loss. Memoised per tick;
+-- derived from storage only, so every client computes the same values.
 local cumulative_cache, cumulative_cache_tick = {}, -1
 
--- Share of the generated power still on the wires when it reaches this
--- transformer's input. `path` is the chain being walked, so a loop stops.
----@param unit UnitNumber
----@param path table<UnitNumber, boolean>
----@param depth integer
----@return number
-local function surviving_share(unit, path, depth)
-  if path[unit] or depth > 32 then return 1 end
+-- Share of a transformer's draw that it passes on (its output), and how its
+-- own loss splits between inefficiency and core loss. An idle transformer
+-- passes on the efficiency setting, with no core loss counted.
+local function transfer(parts)
+  local draw, out = parts.p_draw or 0, parts.p_out or 0
+  local ineff, core = parts.ineff_burn or 0, parts.no_load_burn or 0
+  if draw > 0 and out > 0 and out <= draw then
+    local lost = draw - out
+    local split = ineff + core > 0 and ineff / (ineff + core) or 1
+    return out / draw, lost / draw * split, lost / draw * (1 - split)
+  end
+  local e = storage.settings.efficiency or 1
+  return e, 1 - e, 0
+end
+
+-- {surviving, line, ineff, core} at a transformer's input, as shares of the
+-- power generated for it (they add up to 1). `path` stops loops.
+---@return number, number, number, number
+local function upstream_shares(unit, path, depth)
   local parts = storage.transformers[unit]
-  if not parts then return 1 end
+  if path[unit] or depth > 32 or not parts then return 1, 0, 0, 0 end
   local feeders = storage.line_loss_feeders and storage.line_loss_feeders[unit]
-  if not feeders or next(feeders) == nil then
-    -- Fed straight by generators: the generator wires are the only stage
-    return 1 - (get_generator_loss(parts, cumulative_cache_tick) or 0)
+  if not has_live_feeder(feeders) then
+    -- Fed straight by generators: one segment, line loss only
+    local loss = get_generator_loss(parts, cumulative_cache_tick) or 0
+    return 1 - loss, loss, 0, 0
   end
   path[unit] = true
-  local num, den, sum, count = 0, 0, 0, 0
-  local s = storage.settings
+  local acc, weight, n = {0, 0, 0, 0}, 0, 0
+  local plain = {0, 0, 0, 0}
+  local closeness = storage.settings.closeness
   for source, d in pairs(feeders) do
     local source_parts = storage.transformers[source]
     if source_parts then
-      local share = surviving_share(source, path, depth + 1) * (1 - get_route_line_loss(d))
+      local surv, line, ineff, core = upstream_shares(source, path, depth + 1)
+      -- the feeder itself
+      local e, e_ineff, e_core = transfer(source_parts)
+      ineff = ineff + surv * e_ineff
+      core = core + surv * e_core
+      surv = surv * e
+      -- the segment from the feeder to here
+      local loss = get_route_line_loss(d)
+      line = line + surv * loss
+      surv = surv * (1 - loss)
       local p = source_parts.p_deliv or 0
-      local flows = s.closeness and source_parts.line_flows
+      local flows = closeness and fresh_line_flows(source_parts, cumulative_cache_tick)
       if flows then p = flows[unit] or 0 end
-      num = num + p * share
-      den = den + p
-      sum = sum + share
-      count = count + 1
+      acc[1], acc[2], acc[3], acc[4] = acc[1] + p * surv, acc[2] + p * line, acc[3] + p * ineff, acc[4] + p * core
+      plain[1], plain[2], plain[3], plain[4] = plain[1] + surv, plain[2] + line, plain[3] + ineff, plain[4] + core
+      weight = weight + p
+      n = n + 1
     end
   end
   path[unit] = nil
-  if count == 0 then return 1 end
-  local share = den > 0 and num / den or sum / count
-  if not (share == share and share > 0 and share <= 1) then return 1 end
-  return share
+  local w, t = weight, acc
+  if not (w > 0) then w, t = n, plain end
+  local surv, line, ineff, core = t[1] / w, t[2] / w, t[3] / w, t[4] / w
+  if not (surv == surv and surv >= 0 and surv <= 1) then return 1, 0, 0, 0 end
+  return surv, line, ineff, core
 end
 
--- Everything lost in the wires between the generators and this transformer,
--- compounded over every stage: 1 - (1 - L1)(1 - L2)...
 ---@param unit_number UnitNumber
----@return number? loss  nil when line losses are off or the transformer is unknown
-function get_cumulative_line_loss(unit_number)
+---@return number? total, number? line, number? inefficiency, number? core
+---  shares of the power generated for this transformer, lost before its
+---  input; nil when line losses are off or the transformer is unknown
+function get_cumulative_upstream_loss(unit_number)
   if not storage.settings.enabled then return nil end
   if not storage.transformers[unit_number] then return nil end
   local tick = game.tick
   if cumulative_cache_tick ~= tick then
     cumulative_cache, cumulative_cache_tick = {}, tick
   end
-  local loss = cumulative_cache[unit_number]
-  if loss == nil then
-    loss = 1 - surviving_share(unit_number, {}, 0)
-    if not (loss == loss and loss >= 0 and loss < 1) then loss = 0 end
-    cumulative_cache[unit_number] = loss
+  local entry = cumulative_cache[unit_number]
+  if not entry then
+    local surv, line, ineff, core = upstream_shares(unit_number, {}, 0)
+    entry = {1 - surv, line, ineff, core}
+    cumulative_cache[unit_number] = entry
   end
-  return loss
+  return entry[1], entry[2], entry[3], entry[4]
 end
 
--- Line loss of the power arriving at a transformer from upstream (display
--- only: the loss itself is charged at the transformers feeding the network).
+-- Line loss of the last segment: the power arriving at a transformer from
+-- upstream (display only: the loss itself is charged at the transformers
+-- feeding the network, or here for a generator network).
 -- Average over the routes from the transformers feeding it, weighted by the
 -- power each one sends here, taken of the loss ratio L / (1 - L) of each
 -- (individually capped) route and turned back into a loss. Not the same as a
@@ -1654,7 +1713,7 @@ function get_upstream_line_loss(unit_number)
   local s = storage.settings
   if not s.enabled then return nil end
   local feeders = storage.line_loss_feeders and storage.line_loss_feeders[unit_number]
-  if not feeders or next(feeders) == nil then
+  if not has_live_feeder(feeders) then
     -- Fed straight by generators
     local parts = storage.transformers[unit_number]
     if parts then return get_generator_loss(parts) end
@@ -1666,7 +1725,7 @@ function get_upstream_line_loss(unit_number)
     local source_parts = transformers[source]
     if source_parts then
       local p = source_parts.p_deliv or 0
-      local flows = s.closeness and source_parts.line_flows
+      local flows = s.closeness and fresh_line_flows(source_parts, game.tick)
       if flows then p = flows[unit_number] or 0 end
       local route_loss = get_route_loss_ratio(d)
       num = num + p * d
@@ -1684,6 +1743,58 @@ function get_upstream_line_loss(unit_number)
   return loss, distance
 end
 
+-- The transformers feeding one: {source, sent (W), d} for each feeder whose
+-- share reaches it (with "feed nearest consumers first" on, its balanced
+-- share; a share below 0.1% does not count). nil when it is not fed by
+-- transformers.
+---@param unit_number UnitNumber
+---@return table?
+function get_assigned_feeders(unit_number)
+  local feeders = storage.line_loss_feeders and storage.line_loss_feeders[unit_number]
+  if not has_live_feeder(feeders) then return nil end
+  local transformers, closeness, tick = storage.transformers, storage.settings.closeness, game.tick
+  local list, total = {}, 0
+  for source, d in pairs(feeders) do
+    local source_parts = transformers[source]
+    if source_parts then
+      local p = source_parts.p_deliv or 0
+      local flows = closeness and fresh_line_flows(source_parts, tick)
+      if flows then p = flows[unit_number] or 0 end
+      list[#list + 1] = {source = source, sent = p, d = d}
+      total = total + p
+    end
+  end
+  local assigned = {}
+  for _, f in ipairs(list) do
+    if total <= 0 or f.sent > total * 0.001 then
+      f.share = total > 0 and f.sent / total or 1 / #list
+      assigned[#assigned + 1] = f
+    end
+  end
+  table.sort(assigned, function(a, b) return a.source < b.source end)
+  return assigned
+end
+
+-- What powers a transformer, for the panel: its assigned feeders, or the
+-- generators on its upstream network; and the power-weighted
+-- resistance-weighted distance to them.
+---@param unit_number UnitNumber
+---@return "transformers"|"generators"|nil kind, integer count, number? distance
+function get_feeder_summary(unit_number)
+  local parts = storage.transformers[unit_number]
+  if not parts then return nil, 0 end
+  local assigned = get_assigned_feeders(unit_number)
+  if assigned then
+    local _, distance = get_upstream_line_loss(unit_number)
+    return "transformers", #assigned, distance
+  end
+  if parts.gen_loss_all then
+    local _, distance = get_generator_loss(parts)
+    return "generators", parts.gen_count or 0, distance
+  end
+  return nil, 0
+end
+
 -- Fraction of energy that survives the line, for a transformer.
 ---@param transformer_parts TransformerData
 ---@return number
@@ -1699,3 +1810,13 @@ function get_line_factor(transformer_parts)
   if loss > LINE_LOSS_MAX then loss = LINE_LOSS_MAX end
   return 1 - loss
 end
+
+-- For the feed-path view (feed-paths.lua): the search's own helpers
+line_loss_search = {
+  info_of = function(name) return info_of(name) end,
+  supply_distance = function(pole, name) return supply_distance(pole, name) end,
+  generator_types = function(surface) return generator_types(surface) end,
+  rated_output = function(entity) return rated_output(entity) end,
+  heap_push = function(heap, item) return heap_push(heap, item) end,
+  heap_pop = function(heap) return heap_pop(heap) end,
+}

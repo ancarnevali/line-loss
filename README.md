@@ -2,103 +2,107 @@
 
 An add-on for [Power Overload](https://mods.factorio.com/mod/PowerOverload) (Factorio 2.1).
 Power is lost along the wires between transformers: the farther it travels and the thinner the
-poles carrying it, the more is lost. Transformers waste a little of what passes through them, plus
-a small constant core loss. Every loss is drawn by a hidden consumer, so it appears in the electric
-network statistics and loads your power plants like any other demand.
+poles, the more is lost. Transformers also lose a little in conversion, plus a small core loss.
+Every loss is a real demand on your network, visible in the electric network statistics.
 
 ## Requirements and setup
 
 * Factorio 2.1 and Power Overload 2.3.3 or later.
-* Set Power Overload's **Transformer efficiency** map setting to **1 (100%)**. This mod charges
-  transformer inefficiency itself, at its own efficiency setting. If Power Overload's is lower, this
-  mod's efficiency is ignored (so it is never charged twice) and a one-time warning is shown.
+* Set Power Overload's **Transformer efficiency** to **1 (100%)**: this mod charges transformer
+  inefficiency itself. Otherwise its own efficiency setting is ignored and a warning is shown.
 
-## How it works (short version)
+## How it works, in short
 
-* Each pole type has a **line resistance** (shown in its tooltip): small poles about 5.5 times a big
-  pole, huge poles about a third.
-* For each transformer the mod measures the resistance-weighted distance along the wires to what it
-  feeds. Each route loses 0.025% per tile of that distance, capped at 95%; the transformer is
-  charged the sum of what its routes lose, and its **line loss** is that sum as a share of its output.
-* A transformer fed directly by generators also pays for the wires to them: each pole is weighted by
-  the rated output of the generators next to it, so far-away generators cost more. When several
-  transformers draw from the same generators, they are paired like any other sources and consumers.
-* Losses are drawn by hidden consumers per transformer: **Line loss** on its downstream network
-  (and on its upstream network when that is a generator network), and **Transf. ineff.**
-  (inefficiency plus core loss) on its upstream network.
+* Each pole type has a **line resistance** (in its tooltip): small poles about 5.5× a big pole,
+  huge poles about 0.3×.
+* A **segment** is the wires between two transformers, or between the generators and a
+  transformer. Each route through a segment loses 0.025% per tile of resistance-weighted distance,
+  capped at 95%. A transformer is charged the sum over the routes of its next segment.
+* Transformers fed directly by generators also pay for the wires to them; far generators cost more.
+* Losses are drawn by hidden consumers: **Line loss** and **Transf. ineff.** (inefficiency plus
+  core loss).
 
-The details, with a worked example, are in **FAQs**.
+Details and worked examples are in **FAQs.txt**.
 
 ## Interface
 
-* **Hover a transformer**: the power it draws and its line loss for the last segment, the stage just
-  above it, coloured like the grid diagram's diamonds.
-* **Transformer panel**: upstream line loss for the last segment and cumulative, downstream line
-  loss and power lost, inefficiency, core loss, power drawn and output. Every line
-  has a tooltip defining it.
-* **Grid diagram** (shortcut bar, map view): a line for each route between transformers, wider
-  with more power and coloured by its loss, labelled with power and loss; receiving transformers are marked with a diamond.
-* **Grid power panel**: power generated, reaching consumers and lost, averaged over 5 s, and the 5 routes losing the most power.
-* **Line-loss map** (shortcut bar, map view): a dot on every pole, coloured by the line loss of the
-  power reaching it from its nearest transformer (green under 0.5% to dark red at 50% and above) and
-  sized by the power lost delivering the machine load on it. A big red dot is far and heavily
-  loaded: where an upgrade saves the most.
+* **Hover** a transformer: power drawn and "Loss upstream" (total upstream loss); optionally
+  "Loss downstream" (line loss of the next segment). Coloured green < 10%, yellow < 50%, red.
+* **Transformer panel**: a line saying whether "feed nearest consumers first" is on, what powers
+  this transformer (how many transformers or generators) and how far away. Upstream: power
+  generated for this transformer, minus lines, inefficiency and core loss on the way, equals power
+  received; total loss; line loss of the last segment. Downstream, laid out the same: input,
+  minus next-segment line loss, inefficiency and core loss, equals output; total loss. Every row
+  reads "power (percentage)"; tooltips explain each one with the live figures.
+  "Hover information" checkboxes choose what that transformer's hover shows.
+* **Grid diagram** (shortcut, map view): one line per route between transformers, width = power,
+  colour = loss; a diamond on each receiving transformer, coloured by its total upstream loss. Idle routes are hidden unless "Grid
+  diagram: show idle routes" is on.
+* **Grid power panel** (with the grid diagram, draggable): power generated, delivered and lost over
+  the last 5 s, and the 5 routes losing the most, each with a **Show** button.
+* **Line-loss map** (shortcut, map view): a dot per pole, colour = line loss reaching it, size =
+  power lost on its machine load. Big red dots are where an upgrade saves the most.
+
+* **Feed paths** (shortcut, map view): for the transformer you last hovered or opened, the
+  shortest resistance-weighted paths from its sources, coloured by the line loss built up on the
+  way, wider for a bigger share. Power Overload's network colouring is hidden while it is on.
+
+All three shortcuts can be bound to keys.
+
+## Big transmission pole
+
+A big electric pole with no supply area: same reach, recipe, rating and line resistance, but it
+powers nothing around it. Use it for long lines past factories. Unlocked with the big pole.
 
 ## Settings (map)
 
 | Setting | Default | Effect |
 |---|---|---|
-| Line losses | on | Turns line losses, and the displays that depend on them, on or off |
+| Line losses | on | Turns line losses and their displays on or off |
 | Line loss per tile (%) | 0.025 | Loss per tile of resistance-weighted distance |
-| Line losses: feed nearest consumers first | on | Each transformer's power goes mostly to the consumers nearest to it (see FAQs.txt) |
-| Line losses: weight machines by their live load | off | Machines are located per pole and weighted by what they draw right now, instead of counting as spread evenly; costs extra script time |
+| Line losses: feed nearest consumers first | on | Each transformer's power goes mostly to the consumers nearest to it |
+| Line losses: weight machines by their live load | off | Locates machines per pole and weights them by what they draw; costs extra script time |
 | Transformer efficiency | 0.99 | Energy out per energy in |
 | Transformer core loss (%) | 0.1 | Constant loss of a switched-on transformer, % of its rating; 0 turns it off |
 
+## Settings (per player)
+
+| Setting | Default | Effect |
+|---|---|---|
+| Grid diagram: show idle routes | off | Also draws routes carrying no power, in grey |
+| Transformer panel: one unit for all power figures | off | All power figures in the unit of the largest |
+| Transformer panel: show input - output next to total loss | off | For checking that it equals the sum of the losses |
+
 ## Gameplay
 
-* Carry power far on big or huge poles and step down close to the factory; long runs of small poles
-  are expensive.
+* Carry power far on big or huge poles; step down close to the factory.
 * Feed large networks from several sides.
-* Every transformer stage costs its inefficiency, and every switched-on transformer its core loss:
-  do not stack or spam them without reason.
-* Use the line-loss map and the worst-routes list to see where an upgrade saves the most.
+* Every transformer in a chain costs inefficiency and core loss: don't stack them without reason.
+* Use the line-loss map and the worst-routes list to find the best upgrades.
 
 ## Performance
 
-"Weight machines by their live load" adds an entity search per pole whenever a network is searched
-again, and it searches a network again whenever an electric machine is built or removed on it, so
-building large blueprints costs extra script time while bots work.
-
-Distances are searched one transformer at a time. A search runs when its network changes (a pole
-built or removed, networks merged or split, a transformer added or removed) at up to 100 poles per
-tick, and a slow background pass (10 poles per tick) catches changes no event reports, such as a
-wire added inside a network. Power is measured once a second from network statistics and smoothed;
-the losses set from it apply from the next tick, so losses follow load changes within a few seconds
-(and a transformer hands on the energy it draws one tick later, as in Power Overload). The
-"nearest first" balancing runs every 5 s per network, spread out so networks do not all update on
-the same tick. To check the cost on your save, enable `show-time-usage` in the debug settings (F4).
+* Searches run one transformer at a time, only when its network changes (up to 100 poles per tick),
+  plus a slow background pass (10 poles per tick).
+* Power is measured once a second; losses follow load changes within a few seconds.
+* "Weight machines by their live load" adds an entity search per pole and re-searches when machines
+  are built or removed.
+* Check the cost on your save with `show-time-usage` (F4 debug settings).
 
 ## Notes
 
-* Power Overload's high- and low-priority transformers are hidden: they cannot be crafted, and
-  saves that had unlocked them lose the recipes. Their priority makes them supply first or last,
-  while this mod splits a network's supply among its transformers as if they shared it. Ones
-  already built keep working, but their losses are not accurate on networks with mixed priorities.
-* Power Overload's transformer data is private, so each transformer's power is read from network
-  statistics; when several feed one network the total is split by Power Overload's buffer sizes.
-* A wire added or removed inside a network without merging or splitting it is picked up by the
-  background pass, so it can take a while on very large bases.
-* By default machines count as spread evenly over poles, so a heavy machine cluster costs the same as
-  a light one on the same poles. Turn on "weight machines by their live load" to locate them, or put a
-  transformer in front of a big remote load to have it measured exactly.
-* Not charged: machines powered directly by a generator network (no transformer in between), and
-  generators wired into a network that a transformer also feeds.
+* Power Overload's high- and low-priority transformers are hidden, so they don't interfere with how
+  this mod assigns generators and consumers to transformers.
+* A wire added inside a network is picked up by the background pass, which can take a while on
+  large bases.
+* By default machine load counts as spread evenly over the poles; turn on machine weighting to
+  locate it.
+* Not charged: machines on a generator network with no transformer in between, and generators wired
+  into a network a transformer also feeds.
+* Older saves are upgraded automatically.
 
 ## Credits and licence
 
 * Built on [Power Overload](https://mods.factorio.com/mod/PowerOverload) by Xorimuth (Tom Burrows),
-  which it requires. Parts of this mod are adapted from Power Overload's code, and it uses Power
-  Overload's `shared.lua` and settings at runtime.
-* MIT licence. LICENCE.txt keeps Power Overload's copyright notice (Copyright (c) 2022 Tom Burrows)
-  together with this add-on's (Copyright (c) 2026 Antonio Carnevali).
+  and uses parts of its code.
+* MIT licence (see LICENCE.txt).
