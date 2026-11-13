@@ -73,11 +73,11 @@ local function core_loss_tooltip(parts, s)
   local text = {"", {"line-loss-panel.core-tooltip", string.format("%g", s.no_load * 100), format(parts.rating or 0), format(parts.no_load_burn or 0)}}
   local up, down = parts.rating_in, parts.rating_out
   if up and down then
-    text[#text + 1] = "\n\n"
+    text[#text + 1] = "\n"
     text[#text + 1] = {"line-loss-panel.core-tooltip-rating",
       {"entity-name." .. up.name}, format(up.w), {"entity-name." .. down.name}, format(down.w), format(parts.rating or 0)}
   end
-  text[#text + 1] = "\n\n"
+  text[#text + 1] = "\n"
   text[#text + 1] = {"line-loss-panel.core-tooltip-advice"}
   return text
 end
@@ -89,24 +89,48 @@ local function fill(frame, entity, player)
   local content = frame.content
   content.clear()
   local parts = storage.transformers[entity.unit_number]
-  if not parts then
-    content.add{type = "label", caption = {"line-loss-panel.not-tracked"}}
-    return
-  end
+  if not parts then return end  -- filled by the next refresh once tracked
   local format = power
   local s = storage.settings
   local draw, out = parts.p_draw or 0, parts.p_deliv or 0
   -- One unit for the whole panel: the one that suits its largest figure
   local largest = math.max(draw, out, parts.gen_burn or 0)
-  local total_up = s.enabled and get_cumulative_upstream_loss(entity.unit_number)
+  local total_up, up_line, up_ineff, up_core
+  if s.enabled then total_up, up_line, up_ineff, up_core = get_cumulative_upstream_loss(entity.unit_number) end
   if total_up and total_up < 1 then largest = math.max(largest, draw / (1 - total_up)) end
   local same_unit = player.mod_settings["line-loss-panel-same-unit"]
   panel_unit = (same_unit and same_unit.value) and ratings.power_unit(largest) or nil
 
+  -- Default view (per-player setting off): the two totals only
+  local detailed = player.mod_settings["line-loss-detailed-panel"]
+  if not (detailed and detailed.value) then
+    panel_unit = nil
+    header(content, {"line-loss-panel.section-in"})
+    if total_up and total_up < 1 then
+      local generated = draw / (1 - total_up)
+      row(content, {"line-loss-panel.total-loss-up", share_and_power(total_up, generated * total_up)},
+        {"line-loss-panel.breakdown", share_and_power(up_line or 0, generated * (up_line or 0)),
+          share_and_power(up_ineff or 0, generated * (up_ineff or 0)), share_and_power(up_core or 0, generated * (up_core or 0))})
+      row(content, {"line-loss-panel.received-default", share_and_power(1 - total_up, draw)},
+        {"line-loss-panel.upstream-part-tooltip"})
+    elseif s.enabled then
+      row(content, {"line-loss-panel.calculating-total"})
+    else
+      row(content, {"line-loss-panel.disabled"})
+    end
+    header(content, {"line-loss-panel.section-out"})
+    local line_w = s.enabled and (parts.line_burn or 0) or 0
+    local lost = line_w + (parts.ineff_burn or 0) + (parts.no_load_burn or 0)
+    local function of_input(w) return share_and_power(draw > 0 and w / draw or 0, w) end
+    row(content, {"line-loss-panel.total-loss", of_input(lost)},
+      {"line-loss-panel.breakdown", of_input(line_w), of_input(parts.ineff_burn or 0), of_input(parts.no_load_burn or 0)})
+    row(content, {"line-loss-panel.supplied-default", of_input(out)}, {"line-loss-panel.supplied-tooltip"})
+    return
+  end
+
   if s.enabled then
-    -- Opener: the two model settings, then what feeds this transformer
+    -- Opener: machine weighting, then what feeds this transformer
     local function state(on) return {"line-loss-panel.state-" .. (on and "on" or "off")} end
-    row(content, {"line-loss-panel.opener-matching", state(s.closeness)})
     row(content, {"line-loss-panel.opener-weighting", state(s.machine_weighting)})
     local kind, n, d = get_feeder_summary(entity.unit_number)
     local fed
@@ -151,7 +175,7 @@ local function fill(frame, entity, player)
   local function of_input(w) return draw > 0 and w / draw or 0 end
   local line_w = s.enabled and (parts.line_burn or 0) or 0
   if s.enabled then
-    if parts.line_distance then
+    if parts.kirch_tick then
       sub_row(content, {"line-loss-panel.part-line-next", share_and_power(of_input(line_w), line_w)}, {"line-loss-panel.outgoing-tooltip"})
     else
       sub_row(content, {"line-loss-panel.calculating"}, {"line-loss-panel.outgoing-tooltip"})
@@ -213,7 +237,6 @@ function transformer_panel_on_opened(event)
   local player = game.get_player(event.player_index)
   if player then
     open_panel(player, entity)
-    feed_paths_set_target(player.index, entity.unit_number)
   end
 end
 

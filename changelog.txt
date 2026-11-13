@@ -1,4 +1,21 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.2.0
+Date: 2026-11-13
+  Features:
+    - New loss model. Transmission networks (only transmission poles): power divides over parallel lines by resistance, and each wire loses more the more it carries (the old rate at a quarter of its rating, at least a tenth of it at light load). Distribution networks (any distribution pole or generators): each pole is fed by its nearest transformer, or its nearest generators while they have output left (solar by daylight); loss per tile as before. The pole window shows the network's kind.
+    - Transmission poles: every pole rated like a big pole or more (fuses and other mods' poles included) has no supply area and is named "<pole> (transmission)". The big electric pole can no longer be crafted: build the big electric pole (transmission); big poles already built keep working, and the upgrade planner converts them.
+    - Mixed wires: a wire straight from a transmission pole to a distribution pole, or between transmission poles in a distribution network, costs extra resistance (setting, ×2); the first kind is dashed in the map views.
+    - Poles overload on the power through them (Power Overload's own check off by default): destroy, damage or catch fire.
+    - Map views: line loading (power), line loading (% of rating), line losses (with the power panel), networks (transmission vs distribution, and what feeds each pole). Hovering a transformer highlights the wires carrying its power.
+    - Compact substation: a substation with a medium pole's supply area.
+    - Energy tab in the crafting menu (adapted from Energy Category by Lumme), with rows for transmission poles, distribution poles and transformers. Uses Energy Category's tab when installed.
+  Changes:
+    - Desloppified in-game text.
+    - Power Overload's "Transformer efficiency" is locked at 1 and "When power pole is overloaded" at Nothing.
+    - Transformer panel: upstream total loss and power received, downstream total loss and power supplied; the full breakdown with the per-player setting "Transformer panel: show detailed info".
+    - Network panel: the network downstream of the transformer hovered or opened, with its sources, consumption and the wires losing the most power.
+    - Removed: setting "Feed nearest consumers first"; the grid diagram, line-loss map and feed paths (replaced by the map views).
+---------------------------------------------------------------------------------------------------
 Version: 0.1.5
 Date: 2026-11-11
   Optimizations:

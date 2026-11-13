@@ -5,8 +5,11 @@ require("__line-loss__/scripts/transformers")
 require("__line-loss__/scripts/line-losses")
 require("__line-loss__/scripts/grid-diagram")
 require("__line-loss__/scripts/hover")
-require("__line-loss__/scripts/heatmap")
-require("__line-loss__/scripts/feed-paths")
+require("__line-loss__/scripts/machine-loads")
+require("__line-loss__/scripts/kirchhoff")
+require("__line-loss__/scripts/distribution")
+require("__line-loss__/scripts/network-type")
+require("__line-loss__/scripts/line-loading")
 require("__line-loss__/scripts/transformer-panel")
 
 -- Settings -----------------------------------------------------------------------
@@ -17,20 +20,17 @@ local function read_settings()
   storage.settings = {
     enabled = global["line-loss-enabled"].value,
     per_tile = global["line-loss-per-tile"].value,
-    closeness = global["line-loss-closeness"].value,
     efficiency = global["line-loss-transformer-efficiency"].value,
     no_load = global["line-loss-no-load"].value / 100,
     machine_weighting = global["line-loss-machine-weighting"].value,
+    mixed = global["line-loss-mixed-wires"].value,
+    pole_overload = global["line-loss-pole-overload"].value,
     po_efficiency = po_efficiency and po_efficiency.value or 1,
   }
 end
 
 script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   local name = event.setting
-  if name == "line-loss-show-idle-routes" then
-    update_grid_diagram(event.tick, true)
-    return
-  end
   if string.sub(name, 1, 10) == "line-loss-" or name == "power-overload-transformer-efficiency" then
     local old = storage.settings or {}
     read_settings()
@@ -38,12 +38,15 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
     if not new.enabled then
       reset_hover()
       grid_diagram_clear()
-      heatmap_clear()
-      feed_paths_clear_all()
-    elseif not old.enabled or new.per_tile ~= old.per_tile or new.closeness ~= old.closeness
-        or new.machine_weighting ~= old.machine_weighting then
+      line_loading_clear_all()
+    elseif not old.enabled or new.machine_weighting ~= old.machine_weighting or new.mixed ~= old.mixed then
       -- Searched again: switched back on (nothing was kept up to date while
-      -- off), per-pole losses, sharing, machine counts
+      -- off), machine counts, wire costs
+      if new.mixed ~= old.mixed then
+        storage.wire_graph = {}
+        storage.wire_graph_rev = (storage.wire_graph_rev or 0) + 1
+        line_loading_clear_all()   -- redrawn with or without dashes
+      end
       mark_all_line_loss_dirty()
     end
   end
@@ -56,8 +59,8 @@ local function setup()
   read_settings()
   reset_hover()
   grid_diagram_clear()
-  heatmap_clear()  -- also clears the dots of the old "power lost per pole" view
-  feed_paths_clear_all()
+  legacy_views_clear()
+  line_loading_clear_all()
   -- Legend window from 0.1.2 (removed)
   for _, player in pairs(game.players) do
     local legend = player.gui.screen["line-loss-map-legend"]
@@ -111,9 +114,11 @@ local function on_entity_changed(event, removed)
     mark_line_loss_network(entity.electric_network_id)
   elseif entity.type ~= "entity-ghost" and ((storage.settings and storage.settings.machine_weighting)
       or line_loss_search.is_generator(entity)) then
-    -- Generators weight their network's generator search; machines, with
-    -- machine weighting on, the poles powering them
+    -- Generators weight their network's generator search and are sources on
+    -- distribution networks (topology rebuilt); machines, with machine
+    -- weighting on, the poles powering them
     mark_line_loss_network(network_of(entity))
+    if line_loss_search.is_generator(entity) then storage.wire_graph_rev = (storage.wire_graph_rev or 0) + 1 end
   end
 end
 for _, event_id in pairs({
@@ -149,37 +154,38 @@ end)
 script.on_event(defines.events.on_tick, function(event)
   local tick = event.tick
   update_line_losses(tick)
+  kirchhoff_update(tick)
   update_transformers(tick)
   update_grid_diagram(tick)
   update_hover(tick)
-  update_heatmap(tick)
-  update_feed_paths(tick)
+  update_line_loading(tick)
   update_transformer_panels(tick)
 end)
 
 -- Panel next to an opened transformer
-script.on_event(defines.events.on_gui_opened, transformer_panel_on_opened)
-script.on_event(defines.events.on_gui_closed, transformer_panel_on_closed)
+script.on_event(defines.events.on_gui_opened, function(event)
+  transformer_panel_on_opened(event)
+  network_type_on_opened(event)
+end)
+script.on_event(defines.events.on_gui_closed, function(event)
+  transformer_panel_on_closed(event)
+  network_type_on_closed(event)
+end)
 
--- Grid diagram toggle -----------------------------------------------------------
+-- Map views ------------------------------------------------------------------------
 
-script.on_event("line-loss-toggle-grid-diagram", function(event)
-  toggle_grid_diagram(game.get_player(event.player_index), event.tick)
-end)
-script.on_event("line-loss-toggle-heatmap", function(event)
-  toggle_heatmap(game.get_player(event.player_index), event.tick)
-end)
-script.on_event("line-loss-toggle-feed-paths", function(event)
-  toggle_feed_paths(game.get_player(event.player_index))
-end)
+local VIEWS = {
+  ["line-loss-toggle-line-loading"] = function(player) toggle_line_loading(player) end,
+  ["line-loss-toggle-line-loading-rated"] = function(player) toggle_line_loading_rated(player) end,
+  ["line-loss-toggle-losses"] = function(player) toggle_line_losses(player) end,
+  ["line-loss-toggle-networks"] = function(player) toggle_line_networks(player) end,
+}
+for name, toggle in pairs(VIEWS) do
+  script.on_event(name, function(event) toggle(game.get_player(event.player_index)) end)
+end
 script.on_event(defines.events.on_lua_shortcut, function(event)
-  if event.prototype_name == "line-loss-toggle-grid-diagram" then
-    toggle_grid_diagram(game.get_player(event.player_index), event.tick)
-  elseif event.prototype_name == "line-loss-toggle-heatmap" then
-    toggle_heatmap(game.get_player(event.player_index), event.tick)
-  elseif event.prototype_name == "line-loss-toggle-feed-paths" then
-    toggle_feed_paths(game.get_player(event.player_index))
-  end
+  local toggle = VIEWS[event.prototype_name]
+  if toggle then toggle(game.get_player(event.player_index)) end
 end)
 
 script.on_event(defines.events.on_gui_location_changed, function(event)
@@ -196,3 +202,16 @@ script.on_event(defines.events.on_gui_click, function(event)
   local element = event.element
   if element and element.valid then grid_diagram_on_click(element, game.get_player(event.player_index)) end
 end)
+
+-- Read-only interface for test tools (line-loss-testbench)
+remote.add_interface("line-loss", {
+  -- {["a:b"] = {a, b, w, lost}} per wire (pole unit numbers), from the last solve; nil before it
+  wire_loads = function() return kirchhoff_wire_loads() end,
+  -- a transformer's losses: downstream, upstream (last segment), delivered and drawn power
+  transformer = function(unit)
+    local parts = storage.transformers[unit]
+    if not parts then return nil end
+    return {down = 1 - get_line_factor(parts), up = get_upstream_line_loss(unit),
+      deliv = parts.p_deliv, draw = parts.p_draw}
+  end,
+})

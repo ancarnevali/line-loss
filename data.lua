@@ -2,7 +2,7 @@
 -- network statistics. Placed by control.lua on Power Overload's hidden
 -- transformer surface, next to Power Overload's own hidden interfaces:
 --   "Line loss"      on the transformer's downstream network
---   "Transf. ineff." on the transformer's upstream network
+--   "Transformer losses" on the transformer's upstream network
 
 local template = data.raw["electric-energy-interface"]["po-transformer-interface-hidden-in"]
 
@@ -50,72 +50,35 @@ data:extend{
   consumer("line-loss-ineff-consumer"),
 }
 
--- Grid diagram and line-loss map toggles (shortcut bar + optional key bindings).
--- The line-loss map keeps the internal name "heatmap" so key bindings carry over.
-data:extend{
-  {
-    type = "shortcut",
-    name = "line-loss-toggle-grid-diagram",
-    localised_description = {"shortcut-description.line-loss-toggle-grid-diagram"},
-    action = "lua",
-    associated_control_input = "line-loss-toggle-grid-diagram",
-    toggleable = true,
-    order = "c[toggles]-h[grid-diagram]",
-    icon = "__line-loss__/graphics/shortcuts/grid-diagram-x32.png",
-    icon_size = 32,
-    small_icon = "__line-loss__/graphics/shortcuts/grid-diagram-x24.png",
-    small_icon_size = 24,
-  },
-  {
-    type = "shortcut",
-    name = "line-loss-toggle-heatmap",
-    localised_description = {"shortcut-description.line-loss-toggle-heatmap"},
-    action = "lua",
-    associated_control_input = "line-loss-toggle-heatmap",
-    toggleable = true,
-    order = "c[toggles]-h[grid-heatmap]",
-    icon = "__line-loss__/graphics/shortcuts/heatmap-x32.png",
-    icon_size = 32,
-    small_icon = "__line-loss__/graphics/shortcuts/heatmap-x24.png",
-    small_icon_size = 24,
-  },
-  {
-    type = "shortcut",
-    name = "line-loss-toggle-feed-paths",
-    localised_description = {"shortcut-description.line-loss-toggle-feed-paths"},
-    action = "lua",
-    associated_control_input = "line-loss-toggle-feed-paths",
-    toggleable = true,
-    order = "c[toggles]-h[grid-paths]",
-    icon = "__line-loss__/graphics/shortcuts/feed-paths-x32.png",
-    icon_size = 32,
-    small_icon = "__line-loss__/graphics/shortcuts/feed-paths-x24.png",
-    small_icon_size = 24,
-  },
-  {
-    type = "custom-input",
-    name = "line-loss-toggle-feed-paths",
-    localised_name = {"shortcut-name.line-loss-toggle-feed-paths"},
-    key_sequence = "",
-    consuming = "none",
-    order = "e",
-  },
-  {
-    type = "custom-input",
-    name = "line-loss-toggle-heatmap",
-    localised_name = {"shortcut-name.line-loss-toggle-heatmap"},
-    key_sequence = "",
-    consuming = "none",
-    order = "d",
-  },
-  {
-    type = "custom-input",
-    name = "line-loss-toggle-grid-diagram",
-    localised_name = {"shortcut-name.line-loss-toggle-grid-diagram"},
-    key_sequence = "",
-    consuming = "none",
-    order = "c",
-  },
-}
-
+-- Map views (shortcut bar + optional key bindings)
+local function view(name, icon, order)
+  return {
+    {
+      type = "shortcut",
+      name = name,
+      localised_description = {"shortcut-description." .. name},
+      action = "lua",
+      associated_control_input = name,
+      toggleable = true,
+      order = "c[toggles]-h[" .. order .. "]",
+      icon = "__line-loss__/graphics/shortcuts/" .. icon .. "-x32.png",
+      icon_size = 32,
+      small_icon = "__line-loss__/graphics/shortcuts/" .. icon .. "-x24.png",
+      small_icon_size = 24,
+    },
+    {
+      type = "custom-input",
+      name = name,
+      localised_name = {"shortcut-name." .. name},
+      key_sequence = "",
+      consuming = "none",
+      order = order,
+    },
+  }
+end
+data:extend(view("line-loss-toggle-line-loading", "line-loading", "a"))
+data:extend(view("line-loss-toggle-line-loading-rated", "line-loading-rated", "b"))
+data:extend(view("line-loss-toggle-losses", "losses", "c"))
+data:extend(view("line-loss-toggle-networks", "networks", "d"))
 require("__line-loss__/prototypes/big-transmission-pole")
+require("__line-loss__/prototypes/compact-substation")

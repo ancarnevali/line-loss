@@ -2,7 +2,7 @@
 -- and charges the losses through hidden consumers next to each transformer:
 --   "Line loss"      on the downstream network: delivered * L / (1 - L),
 --                    L = downstream line loss
---   "Transf. ineff." on the upstream network: inefficiency
+--   "Transformer losses" on the upstream network: inefficiency
 --                    p_in * (1 - e) / e, plus the core loss (a share of the
 --                    rating, while switched on)
 --   "Line loss"      on the upstream network, when it is fed straight by
@@ -32,9 +32,11 @@
 ---@field pole_out LuaEntity?  Power Overload's hidden output pole
 ---@field interface_out LuaEntity?  Power Overload's hidden output interface
 ---@field line_eei LuaEntity?   "Line loss" consumer (downstream network)
----@field ineff_eei LuaEntity?  "Transf. ineff." consumer (upstream network)
+---@field ineff_eei LuaEntity?  "Transformer losses" consumer (upstream network)
 ---@field line_in_eei LuaEntity?  "Line loss" consumer on the upstream network, when it is a generator network
----@field gen_loss number?  upstream line loss from generators (generator networks only)
+---@field kirch_line_loss number?  downstream line loss (kirchhoff.lua)
+---@field kirch_up_loss number?  upstream line loss, fed by transformers (kirchhoff.lua)
+---@field kirch_gen_loss number?  upstream line loss, fed straight by generators (kirchhoff.lua)
 ---@field gen_burn number   power burned by line_in_eei (W)
 ---@field p_out number   power given to the downstream network, including the line loss (W)
 ---@field p_deliv number power that reaches consumers after the line loss (W)
@@ -42,7 +44,6 @@
 ---@field p_draw number  total power drawn from the upstream network: p_in + inefficiency + core loss (W)
 ---@field line_burn number
 ---@field ineff_burn number
----@field line_distance number?  load-weighted distance (line-losses.lua)
 ---@field rating number?  rated power: the weaker side's strongest pole (W)
 ---@field no_load_burn number  constant loss while switched on (W)
 
@@ -83,6 +84,11 @@ local function pole_rating(pole)
   if not w then return nil end
   local quality = pole.quality
   return w * (quality and quality.default_multiplier or 1)
+end
+
+-- (also used by the line loading view)
+function line_loss_pole_rating(pole)
+  return pole_rating(pole)
 end
 
 ---@param hidden_pole LuaEntity?
@@ -170,12 +176,12 @@ end
 ---@return NetworkLoads
 function get_network_loads(pole, tick)
   local network_id = pole.electric_network_id
-  if not network_id then return {machines = 0, line = 0, ineff = 0, transformers = 0, by_name = {}} end
+  if not network_id then return {machines = 0, line = 0, ineff = 0, transformers = 0, generated = 0, by_name = {}} end
   local loads_cache = loads_cache_table()
   local entry = loads_cache[network_id]
   if entry and tick - entry.tick < LOADS_TTL and tick >= entry.tick then return entry.loads end
 
-  local loads = {machines = 0, line = 0, ineff = 0, transformers = 0, by_name = {}}
+  local loads = {machines = 0, line = 0, ineff = 0, transformers = 0, generated = 0, by_name = {}}
   local statistics = pole.electric_network_statistics
   local qualities = get_quality_names()
   local function add(name, quality)
@@ -200,6 +206,24 @@ function get_network_loads(pole, tick)
       else
         for quality in pairs(inner) do
           if qualities[quality] then add(outer, quality) end
+        end
+      end
+    end
+  end
+  -- Power produced on the network other than by transformer outputs:
+  -- generators (and accumulators discharging)
+  local outputs = {}
+  for _, name in pairs(OUTPUT_INTERFACES) do outputs[name] = true end
+  local function produced(name, quality)
+    if not outputs[name] then loads.generated = loads.generated + flow(statistics, "output", name, quality) end
+  end
+  for outer, inner in pairs(statistics.output_quality_counts or {}) do
+    if type(inner) == "table" then
+      if qualities[outer] then
+        for name in pairs(inner) do produced(name, outer) end
+      else
+        for quality in pairs(inner) do
+          if qualities[quality] then produced(outer, quality) end
         end
       end
     end
@@ -253,8 +277,6 @@ function unregister_transformer(unit)
   invalidate_line_loss_inputs()
   mark_line_loss_network(parts.in_net)
   pole_ownership_forget_source(unit)
-  generator_ownership_forget(unit)
-  heatmap_forget_source(unit)
 end
 
 function scan_transformers()
@@ -352,14 +374,14 @@ local function refresh_parts(parts)
   end
   ensure_consumer(parts, "line_eei", LINE_EEI, hidden_surface, parts.position_out)
   ensure_consumer(parts, "ineff_eei", INEFF_EEI, hidden_surface, parts.position_in)
-  set_generator_consumer(parts, parts.gen_loss_all ~= nil)
+  set_generator_consumer(parts, parts.gen_fed == true)
 end
 
 local function complete(parts)
   return parts.pole_in and parts.pole_in.valid and parts.pole_out and parts.pole_out.valid
     and parts.interface_out and parts.interface_out.valid
     and parts.line_eei and parts.line_eei.valid and parts.ineff_eei and parts.ineff_eei.valid
-    and (parts.gen_loss_all == nil) == (parts.line_in_eei == nil)
+    and (not parts.gen_fed) == (parts.line_in_eei == nil)
 end
 
 ---@param entity LuaEntity?
@@ -503,17 +525,12 @@ function update_transformers(tick)
     -- Fed straight by generators: the wires between them and this
     -- transformer lose gen_loss of what the generators send, so
     -- gen_burn = draw * loss / (1 - loss)
-    local gen_loss = settings_.enabled and get_generator_loss(parts, tick) or 0
+    local gen_loss = settings_.enabled and get_generator_loss(parts) or 0
     if not (gen_loss == gen_loss and gen_loss > 0 and gen_loss < 1) then gen_loss = 0 end
     parts.gen_burn = parts.p_draw * gen_loss / (1 - gen_loss)
     set_burn(parts.line_eei, parts.line_burn)
     set_burn(parts.ineff_eei, parts.ineff_burn + parts.no_load_burn)
     set_burn(parts.line_in_eei, parts.gen_burn)
-  end
-
-  -- Load-weighted distances from the fresh power figures
-  for _, parts in pairs(transformers) do
-    update_line_distance(parts, tick)
   end
 
   if refresh then purge_loads_cache(tick) end

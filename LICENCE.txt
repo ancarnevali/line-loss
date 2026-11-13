@@ -22,3 +22,5 @@ SOFTWARE.
 ---
 
 Line loss (add-on for Power Overload): Copyright (c) 2026 Antonio Carnevali, under the same MIT licence terms.
+
+The Energy tab (data-final-fixes.lua) and graphics/group/energy.png are adapted from Energy Category by Lumme (MIT licence).

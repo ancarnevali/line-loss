@@ -76,6 +76,17 @@ local function transformer_of_hidden_pole(player_index, hidden_pole)
   return transformer
 end
 
+-- The transformer a player is hovering (itself or one of its hidden poles)
+---@param player LuaPlayer
+---@return LuaEntity?
+function hovered_transformer(player)
+  local selected = player.selected
+  if not (selected and selected.valid) then return nil end
+  if TRANSFORMER_NAMES[selected.name] then return selected end
+  if HIDDEN_TRANSFORMER_POLES[selected.name] then return transformer_of_hidden_pole(player.index, selected) end
+  return nil
+end
+
 ---@param transformer LuaEntity
 ---@return LocalisedString? line1, LocalisedString? line2, string? key
 local function transformer_info(transformer)
@@ -95,7 +106,7 @@ local function transformer_info(transformer)
     add("line-loss.hover-upstream", get_cumulative_upstream_loss(transformer.unit_number) or 0)
   end
   if options.down then
-    add("line-loss.hover-downstream", parts.line_loss or 0)
+    add("line-loss.hover-downstream", 1 - get_line_factor(parts))
   end
   return {"line-loss.drawing-hover", drawing}, line2, key
 end
@@ -141,7 +152,6 @@ local function refresh_player(player, selected)
   local line1, line2, key
   if transformer then
     line1, line2, key = transformer_info(transformer)
-    feed_paths_set_target(player_index, transformer.unit_number)
   end
 
   if not line1 then

@@ -1,234 +1,175 @@
 Line loss - Frequently asked questions
 =======================================
 
-Q: What does this mod do?
-A: It is an add-on for Power Overload. Power is lost along the wires between transformers: the
-   farther it travels and the thinner the poles carrying it, the more is lost. Transformers also
-   lose a little of what passes through them, plus a small constant core loss. Every loss is drawn
-   by a hidden consumer, so it shows in the electric network statistics and loads your power plants
-   like any other demand.
+Q: How and why are we separating transmission and distribution networks?
+A: Why: the goal of this mod is to add grid management inspired decision making to Factorio.
+   Optimising production is fun, but the vanilla way of dealing with the power network breaks my
+   immersion. I think there is a small niche of players that feel the same!
+   Simulating electricity flow is outside the scope of vanilla Factorio, and the game engine is
+   not built to handle a full DC power flow simulation over all the poles that are normally placed
+   in a base. As I'd like to include some grid management mechanics, though, like dealing with
+   electric congestion, power flow simulation is necessary to a degree.
+   To do this, I decided to build on top of the great mod Power Overload, which already invites
+   the player to separate distribution and transmission networks, although it doesn't explicitly
+   call them this way. In such an environment, it's much easier to apply a proper electricity flow
+   simulation, limited to the transmission network. On the other hand, distribution networks are
+   handled with a simplified model where each pole is paired with the closest generator or
+   transformer, which supplies energy including some loss contributions (line loss, transformer
+   core loss, and transformer inefficiency). To increase the realism of such a model, the player
+   can opt in to the "machine weighting" option, which steps up the complexity a notch and
+   dispatches energy non-uniformly across the distribution network, according to machine live
+   power demand. In such a model, a distribution network including a cluster of power hungry
+   machines has less line loss if fed by a transformer close to the power hungry machines.
+   Multiple transformers and local power generation can be used too to find the best balance to
+   minimize losses!
+   How: every pole Power Overload rates like a big electric pole or more (300 MW by default) is a
+   transmission pole; every other pole is a distribution pole. A network made only of
+   transmission poles is a transmission network. A network with any distribution pole or
+   generator is a distribution network, and its transmission poles count as distribution poles.
+   Opening the electricity overview shows which kind its network is.
 
-Q: What do I need to set up?
-A: Factorio 2.1 and Power Overload 2.3.3 or later. Set Power Overload's "Transformer efficiency"
-   map setting to 1 (100%). This mod charges transformer inefficiency itself, at its own
-   "Transformer efficiency" setting (default 99%). If Power Overload's is lower, this mod's
-   efficiency is ignored, so the loss is never charged twice, and a one-time warning is shown.
+Q: What is a Kirchhoff solve? Is it more realistic than vanilla, and how can its realism be pushed
+   further?
+A: A Kirchhoff solve is a DC power flow: power plays the current, and each wire's
+   resistance-weighted length plays its resistance. Power entering and leaving the network
+   (transformer outputs and inputs, machine loads) sets up a linear system whose solution gives
+   every pole a potential; the power on each wire is the potential difference divided by its
+   resistance. Power therefore splits over parallel lines in inverse proportion to their
+   resistance, as in a real grid.
+   Vanilla has no losses at all: a network is one pool, and where power flows does not matter.
+   This is more realistic: routes, parallel lines and bottlenecks all change what is lost.
+   It could be pushed further: an AC power flow (voltages, phase angles, reactive power), losses
+   from the actual current rather than a load-based share, voltage drop at the end of long lines,
+   and a full solve of distribution networks too. It is not worth pushing further for now: it
+   costs much more script time, Factorio has no voltages or reactive power to show for it, and
+   the gameplay would barely change.
 
-Q: How is a wire's resistance decided?
-A: Each pole type has a resistance per tile of wire, from its Power Overload power rating:
-   r = sqrt(P_big / P_pole). With the default ratings:
-     Huge electric pole     0.32
-     Big electric pole      1
-     Substation             1.5
-     Medium electric pole   2.24
-     Small electric pole    5.5
-   Fuses count as the pole they protect. A wire between poles A and B costs
-   length x (r_A + r_B) / 2. Each pole's tooltip shows its value as "Line resistance".
+Q: How exactly does the distribution network work?
+A: Sources are the transformers feeding the network and the poles that pick up generators.
+   A tree search (shortest paths from every source at once, by resistance-weighted distance along
+   copper wires) finds each pole's nearest sources. Each pole's load then goes whole to its
+   nearest source:
+     - its nearest transformer, or
+     - its nearest generators, while they have output left (solar panels with what the daylight
+       gives).
+   A pole is never split between sources; equally near sources take turns. A transformer drawing
+   from the network takes from its nearest generators first, then from its nearest transformer.
+   Power travels to each pole along its shortest path.
+   How much load each pole carries depends on "Weight machines by their live load in distribution
+   networks":
+     Off (default): the network's machine load is spread evenly over all its distribution poles;
+       each pole's share travels to it along its shortest path. This means a pole next to a
+       transformer inputting power into the distribution network carries more power than one at
+       the edge of the network.
+     On: each pole carries the machines in its supply area, weighted by their live power draw; a
+       machine covered by two poles counts half on each. Each pole's share still travels to it
+       along its shortest path, so power hungry machines far from transformers cost more, idle
+       ones almost nothing. Costs an entity search per pole when the network changes.
 
-Q: How far is "far"?
-A: For each transformer the mod finds the shortest path along copper wires from its output to every
-   pole and every downstream transformer on its downstream network. Distances are resistance-weighted,
-   in tiles of big-pole wire: 100 tiles of small poles count as about 550. The search stops at other
-   transformers; it does not pass through them.
+Q: How are losses worked out?
+A: T = transformer. Each "->" line is the hidden consumer that draws that loss, and the network it
+   draws from.
 
-Q: How is the loss calculated?
-A: A route loses "Line loss per tile" (default 0.025%) times its distance, capped at 95% per route,
-   so at least 5% of the power on any route arrives. A route delivering P loses P x L / (1 - L),
-   and a transformer is charged the sum over all its routes; its line loss is that sum as a share of its
-   output. The routes are:
-     - downstream transformers count with the power they actually draw;
-     - machines (anything powered directly by the network: assemblers, lamps, accumulators
-       charging...) are spread over the network's poles that can power them (huge poles, big transmission
-       poles and fuses have no supply area, so they carry power without counting), because the game does not say
-       which pole powers which machine.
-   Example: 100 tiles of big poles lose 2.5%; the same run on small poles about 14%.
+   Steam engines
+        |
+        v
+   Generator network
+        |    line loss on the wires to T gen, per tile x distance
+        |    -> T gen's "Line loss", on the generator network
+        v
+   T gen
+        |    inefficiency + core loss
+        |    -> T gen's "Transformer losses", on the generator network
+        v
+   Transmission network
+        |    line loss, grows with power; power spreads over the whole
+        |    network by pole resistance (Kirchhoff solve)
+        |    -> T gen's "Line loss", on the transmission network
+        v
+   T distr
+        |    inefficiency + core loss
+        |    -> T distr's "Transformer losses", on the transmission network
+        v
+   Distribution network
+        |    line loss, per tile x distance to each pole's nearest source
+        |    -> T distr's "Line loss", on the distribution network
+        v
+   Machines
 
-Q: Where is each loss charged, and where do I see it?
-A: Each transformer gets two hidden consumers, listed by name in the electric network statistics:
-     "Line loss"       on its downstream network: its line loss x its output.
-     "Transf. ineff."  on its upstream network: its inefficiency,
-                       drawn x (1 - e) / e, plus its core loss.
-   A transformer fed directly by generators gets a second "Line loss" consumer, on that generator
-   network, for the wires between the generators and the transformer.
-   A segment is the wires between two transformers, or between the generators and a transformer.
-   The transformer panel (open a transformer) has two sections. Upstream: the line loss of the
-   last segment, and the total upstream loss (line loss in every segment plus the
-   inefficiency and core loss of every transformer between the generators and this one), split
-   into those three parts, as shares of the power generated for it. Downstream: its input, minus
-   the line loss of the next segment, its inefficiency and its core loss, equals its output, and
-   the total loss, as shares of its input. Every row has a tooltip with the live figures.
-   Hovering a transformer shows the power it draws and, by default, "Loss upstream" (the total
-   upstream loss). Under "Hover information" in its panel you can add "Loss downstream" (the line
-   loss of the next segment) or turn either off, for that transformer.
-   On the grid diagram, each diamond is coloured by that transformer's total upstream loss.
+Q: What resistance are we assigning to each pole?
+A: Each pole has a resistance per tile of wire, from its Power Overload rating:
+     r = sqrt(300 MW / pole rating)
+   With Power Overload's default ratings:
+     Pole                        Rating    Resistance
+     Huge electric pole          3 GW      0.32
+     Big electric pole           300 MW    1
+     Substation                  125 MW    1.55
+     Compact substation          125 MW    1.55
+     Medium electric pole        60 MW     2.24
+     Small electric pole         10 MW     5.48
+   Fuses count as their pole. Other mods' poles use the same formula with their Power Overload
+   rating. A wire between poles A and B costs length x (r_A + r_B) / 2. Each pole's tooltip
+   shows its "Line resistance".
 
-Q: What is the core loss?
-A: A switched-on transformer loses a constant 0.1% of its rating (setting), even with no load, like
-   the core of a real transformer. Each side is rated by the strongest pole wired to it (quality
-   included), and the transformer takes the weaker of the two sides. A step-up at a power plant
-   (medium poles into a huge trunk) and a step-down from a huge trunk to medium poles are both
-   rated at the medium pole's 60 MW, so they lose 0.06 MW each. A switched-off transformer loses
-   nothing.
+Q: How can I lower line loss in a transmission network?
+A: - Keep wires lightly loaded: the share a wire loses grows with the power it carries. 100 tiles
+     of big poles lose 0.55% at 10 MW, 2.5% at 75 MW and 9.25% at 300 MW. The "Line loading
+     (% of rating)" view shows yellow above 60% and red above 80%.
+   - Build parallel lines: power splits between them, and two lines sharing a load lose about half
+     of what one line carrying it all would.
+   - Bypass bottlenecks: in one test layout, a bypass around a single busy line cut the feeding
+     transformer's loss from 9.4% to 6.9%.
+   - Use huge poles for bulk power: a third of a big pole's resistance and ten times its rating.
+     100 tiles of huge poles lose 0.36% at 300 MW.
+   - Keep routes short, and step up close to the generators.
+   - Keep distribution poles out: a single medium pole wired into a transmission line turns the
+     whole network into distribution.
+   - Use the "Line losses" view and the network panel's list of the wires losing the most power to
+     find the best upgrades.
 
-Q: Several transformers feed the same network. Who pays for what?
-A: With "Feed nearest consumers first" on (the default), each transformer's power goes mostly to the
-   consumers nearest to it. The flows are balanced so that every transformer delivers what it was
-   measured to deliver and every consumer receives what it draws, each pairing pulled by
-   1 / distance, as current divides inversely with resistance. Every pole belongs to its
-   electrically nearest transformer, which pays for the machines on it.
-   With the option off, every transformer is treated as feeding every consumer in the same
-   proportions.
+Q: How can I lower line loss in a distribution network?
+A: - Put the transformer in the middle of the load: a 9 x 9 block of medium poles 7 tiles apart,
+     40.5 MW of machines, loses 3.3% fed at a corner and 1.9% fed at the centre.
+   - Feed large networks from several sides: the same block fed from two opposite corners loses
+     2.1%.
+   - Use lower-resistance poles for trunks: 100 tiles lose 3.9% on substations or compact
+     substations, 5.6% on medium poles and 13.7% on small poles.
+   - Keep distribution networks small: step down close to the consumers instead of running long
+     distribution lines. Every extra transformer costs inefficiency and core loss, though.
+   - Put local generation (e.g. solar) next to hungry machines far from the transformers.
+   - With machine weighting on, keep power hungry machines close to the transformers.
+   - Use the "Networks" view to see which transformer feeds each wire.
 
-Q: A very power-hungry machine sits at the far end of a line. Does it cost more than lamps there?
-A: Only with the map setting "Line losses: weight machines by their live load" (off by default). By
-   default machines count as spread evenly over the network's poles. With the setting on, each pole
-   is weighted by the machines in its supply area and what that machine type is drawing right now:
-   a 100 MW machine at the end of a line 630 tiles long (resistance-weighted), with 10 MW of lamps
-   along it, gives a 15.1% line loss instead of 8.5%, and drops back to the lamps' 8.1% while the
-   machine is idle. It
-   costs extra script time: an entity search per pole each time a network is searched again, which
-   also happens whenever an electric machine is built or removed.
+Q: Are there new map modes to visualise the Line loss model?
+A: Four shortcuts, one view at a time, all drawn on the map:
+     Line loading: power on each wire, green to red up to the busiest.
+     Line loading (% of rating): power on each wire against its weaker pole's rating, yellow
+       above 60%, red above 80%.
+     Line losses: power lost on each wire, green to red across all wires on the surface.
+       Diamonds show each transformer's total upstream loss. Opens the network panel: the network
+       downstream of the transformer you hover or open, its sources, its consumption and the wires
+       losing the most power, each with a Show button.
+     Networks: transmission networks in blue; in distribution networks, each wire in the colour
+       of the transformer feeding it, grey where several sources meet.
+   In any view, hovering a transformer shows what feeds it, with each source's share and line
+   loss. Wires straight from a transmission pole to a distribution pole are dashed.
 
-Q: Does a power-hungry machine need many poles around it to spread its draw?
-A: No. With machine weighting on, each machine is counted once, at a single pole: the electrically
-   nearest pole whose supply area covers it. Its whole draw sits at that pole's distance from the
-   transformer, however many poles surround it. What lowers its loss is a shorter or
-   lower-resistance path to that pole (a big or huge pole trunk), or a transformer close to it.
+Q: What is not modelled?
+A: - Inside a distribution network, power from a source follows its shortest path; loops do not
+     share the load.
+   - Machines are not placed exactly: with machine weighting off their load is spread evenly over
+     the poles; with it on, each machine counts at the poles covering it, with the average draw
+     of its machine type.
+   - Power from generators that reaches machines without passing a transformer is not charged:
+     losses are always paid by a transformer.
+   - Voltages, reactive power and voltage drop (see the Kirchhoff question).
+   - Power Overload's high- and low-priority transformers are hidden.
 
-Q: Do parallel wires reduce the loss?
-A: No. Distance is the single cheapest path through the wires. In a real grid two lines in parallel
-   halve the resistance and a mesh of poles spreads the current; here a second, parallel line only
-   helps if it is itself a cheaper path. Modelling parallel paths would need a full network solve
-   on every search, which would cost far more script time on large bases, so the mod keeps
-   shortest paths.
-
-Q: Does it pay to feed a network from several sides?
-A: Yes, for spread-out load. Feeding a long network from both ends cuts its machines' line loss by
-   about a third, as real current division would (not by half: current from each end still reaches
-   loads on the other side). Each extra transformer costs its core loss, so do not spam them. With
-   "weight machines by their live load" on, the gain follows where the load actually is: a feeder
-   next to the big consumers helps a lot, one far from any load barely helps.
-
-Q: Do machines far from the transformer get less power?
-A: No. Factorio's networks have no voltage drop: every machine on a network gets the same
-   satisfaction. The loss is paid at the transformer instead, as extra demand drawn by its
-   "Line loss" consumer.
-
-Q: My transformer is fed directly by generators. Do the wires to them lose power too?
-A: Yes. When no other transformer feeds a transformer's upstream network, the mod searches that
-   network from the transformer outwards and weights each pole by the rated output of the
-   generators in its supply area (steam engines, turbines, solar panels...). In a long line of steam
-   engines, the ones farthest from the transformer cost the most. The loss is drawn by a
-   "Line loss" consumer on the generator network and shown as the transformer's upstream line loss
-   ("from its generators"). Each generator is counted once, for the pole nearest the transformer
-   that reaches it.
-
-Q: Several transformers draw from the same generators. Who pays for which?
-A: With "Feed nearest consumers first" on, generators are paired with transformers the same way
-   transformers are paired with consumers: each generator belongs to its electrically nearest
-   transformer, and the flows are balanced so every transformer receives its draw, every group of
-   generators supplies its share of the rated output, and each pairing is pulled by 1 / distance.
-   A transformer's upstream line loss is the average over the generators actually feeding it. Two
-   transformers at opposite ends of a long steam field each pay about a quarter less than the
-   field's overall average. With the option off, each transformer pays the average over every
-   generator on the network.
-
-Q: What is not charged?
-A: Machines powered directly by a generator network, with no transformer in between (lamps hanging
-   off a steam field, say), and generators wired into a network that a transformer also feeds:
-   those generators simply cover part of that network's load.
-
-Q: Can you walk through an example?
-A: Generator -> T1 -> 300 tiles of big poles -> T2 -> 10 MW of machines along 20 tiles of medium
-   poles. The generator sits on a medium pole right next to T1, which has big poles on both sides
-   (rated 300 MW);
-   T2 goes from big to medium poles (rated 60 MW). Default settings. Reading from the generator to
-   the machines:
-     Generator output                                       11.46 MW
-     T1 core loss (0.1% of 300 MW), at the generator         0.30 MW  "Transf. ineff." (T1's)
-     T1 inefficiency (1%), at the generator                  0.11 MW  "Transf. ineff." (T1's)
-     300-tile line (7.5%), between T1 and T2                 0.83 MW  "Line loss" (T1's)
-     T2 core loss (0.1% of 60 MW), between T1 and T2         0.06 MW  "Transf. ineff." (T2's)
-     T2 inefficiency (1%), between T1 and T2                 0.10 MW  "Transf. ineff." (T2's)
-     Medium-pole wires to the machines (0.56%), after T2     0.06 MW  "Line loss" (T2's)
-     Reaching the machines                                  10.00 MW
-   Losses: 1.46 MW, 12.7% of generation.
-
-Q: And with several generators and two branches?
-A: Three steam engines G1, G2, G3 (equal output) at 5, 10 and 15 tiles of medium poles from T1
-   -> 100 tiles of big poles -> T2 and T3 side by side at the end of the trunk:
-     T2 feeds S2: 30 MW of machines along a long line, 200 tiles of medium poles.
-     T3 feeds S3:  5 MW of machines along a short line, 20 tiles of medium poles.
-   T1, T2 and T3 each have medium poles on one side, so each is rated 60 MW. Default settings.
-
-   The losses, from the generators to the machines:
-     G1 + G2 + G3 output (12.99 MW each)                    38.96 MW
-     Generator wires (0.56%), before T1                      0.22 MW  "Line loss" (T1's, upstream)
-     T1 core loss + inefficiency, before T1                  0.45 MW  "Transf. ineff." (T1's)
-     Trunk, 100 tiles of big poles (2.5%)                    0.96 MW  "Line loss" (T1's)
-     T2 core loss + inefficiency, on the trunk               0.38 MW  "Transf. ineff." (T2's)
-     T3 core loss + inefficiency, on the trunk               0.11 MW  "Transf. ineff." (T3's)
-     S2's long line (5.70%)                                  1.81 MW  "Line loss" (T2's)
-     S3's short line (0.56%)                                 0.03 MW  "Line loss" (T3's)
-     Reaching the machines (30 + 5)                         35.00 MW
-   Losses: 3.96 MW, 10.2% of generation.
-
-   Where the distances come from:
-     - Generators: their average distance from T1, 10 tiles x 2.24 (medium pole) = 22.4, so 0.56%.
-     - Trunk: T2 and T3 both sit 100 tiles from T1, so T1 pays 2.5% whatever the split between
-       them.
-     - S2 and S3: machines count as spread along their lines, so each pole's route counts equally.
-       The average distance is half the line, 100 x 2.24 = 224 tiles for S2 (5.59% at that
-       distance), but the far poles lose more than the near ones save, so S2's line loss is 5.70%.
-       S3's line is short: 22.4 tiles, 0.56%.
-   What the panels show:
-     T1: upstream line loss 0.56% (from its generators), downstream 2.5%.
-     T2: upstream 2.5%, downstream 5.70%.   T3: upstream 2.5%, downstream 0.56%.
-   S2's long medium-pole line is the biggest single loss. The worst-routes list does not show it,
-   because it is a machines line, but the line-loss map colours its far poles orange (about 11%).
-   Carrying the power on big poles closer to S2, or feeding S2 from both ends, cuts it.
-
-Q: Are the losses applied instantly?
-A: No, there are two delays:
-     - Inside a transformer (Power Overload): the energy it draws from its upstream network in one
-       tick is handed to its downstream network in the next tick (t -> t+1).
-     - Losses (this mod): the power each transformer moves is read from the network statistics
-       once a second and smoothed (each new reading counts 40%). The losses are then set from that
-       reading and apply from the next tick until the next reading.
-   So losses follow a change in load within a few seconds, and short spikes are averaged out. The
-   totals over time are what count.
-
-Q: Does the loss count towards Power Overload's pole limits?
-A: Yes. The losses are real demand, so a badly lossy line can overload the poles feeding it.
-
-Q: How do I find where I am losing the most?
-A: Turn on the grid diagram (shortcut bar): its panel lists the 5 routes (between transformers, or
-   from generators to a transformer) that lose the most power, each with a "Show" button that opens the map there. The line-loss map
-   (shortcut bar) puts a dot on every pole: coloured by the line loss of the power reaching it,
-   from green (under 0.5%) to dark red (50% and above), and sized by the watts lost delivering the
-   machine load on it. A big red dot is far and heavily loaded; with "weight machines by their
-   live load" on, it is a power-hungry machine far from its transformer.
-
-Q: Where did the grey lines on the grid diagram go?
-A: Grey lines are routes carrying no power right now (for example a transformer whose machines are
-   idle). They are hidden by default to keep the map readable. Turn on the per-player setting
-   "Grid diagram: show idle routes" (Settings > Mod settings > Per player) to draw them again.
-
-Q: Where are Power Overload's high- and low-priority transformers?
-A: Hidden by this mod. A high-priority transformer supplies its downstream network before anything
-   else, a low-priority one only when the rest cannot, but this mod splits a network's supply among
-   its transformers as if they shared it, so their power and losses would be wrong. Their recipes
-   are removed; ones already built keep working. They may be supported in a future version.
-
-Q: Will it slow my game down?
-A: Distances are only searched again when a network changes (a pole built or removed, networks
-   merged or split, a transformer added or removed), at up to 100 poles per tick. Searches read the
-   wires from a cached copy; a background check compares 20 cached poles per tick with the game, to
-   catch wires changed without an event. Power is measured once a second. To check the cost on your
-   save, enable "show-time-usage" in the debug settings (F4).
-
-Q: What is the big transmission pole?
-A: A big electric pole with no supply area. It has the same reach, recipe and rating (300 MW) as
-   the big pole, and the same line resistance, but it powers nothing around it: use it for long
-   lines that pass by factories or ore fields without feeding them. Machine load is never spread
-   over it. It is unlocked with the big electric pole and can replace one directly.
+Q: What is core loss?
+A: A constant loss of a switched-on transformer, whatever it carries, as in a real transformer,
+   whose core uses energy even with no load. It is 0.1% (map setting "Transformer core loss") of
+   the transformer's rating, which is the rating of the strongest pole on its weaker side. It is
+   drawn with the inefficiency by the transformer's "Transformer losses" consumer, on its upstream
+   network. An oversized or idle transformer wastes power this way: size transformers to their
+   load, and switch off the ones you don't need. A future version will add circuit network
+   support, to help turn off inactive transformers automatically.
