@@ -39,6 +39,7 @@ function grid_diagram_clear()
   storage.grid_panel_target = nil
   for _, player in pairs(game.players) do
     destroy_panel(player)
+    destroy_loss_summary(player)
   end
   local state = storage.grid_diagram
   if not state then return end
@@ -101,6 +102,8 @@ local function percent_of(part, whole)
 end
 
 local WORST_WIRES = 5
+-- The network panel is hidden for now (its figures need checking)
+local SHOW_PANEL = false
 
 ---@param player LuaPlayer
 function destroy_panel(player)
@@ -133,11 +136,12 @@ local function network_kind(parts)
   if not (out and out.valid) then return nil end
   local kind = kirchhoff_network_kind(out.unit_number)
   if kind then return kind, out.unit_number end
-  for _, pole in pairs(out.neighbours and out.neighbours.copper or {}) do
-    if pole.valid then
-      kind = kirchhoff_network_kind(pole.unit_number)
-      if kind then return kind, pole.unit_number end
-    end
+  -- poles wired to it, from the cached wire graph (LuaEntity has no neighbours in 2.x)
+  local node = (storage.wire_graph or {})[out.unit_number]
+  local adj = node and node.adj or {}
+  for i = 1, #adj, 3 do
+    kind = kirchhoff_network_kind(adj[i])
+    if kind then return kind, adj[i] end
   end
   return nil
 end
@@ -467,9 +471,15 @@ function update_grid_diagram(tick, force)
           if entry and entry.net == s.net then mine[#mine + 1] = entry end
         end
       end
-      update_panel(player, s and s.entity, s and average(stats.by_net[s.net]), mine)
+      if SHOW_PANEL or line_loss_show_network_panel then  -- global: test override
+        update_panel(player, s and s.entity, s and average(stats.by_net[s.net]), mine)
+      else
+        destroy_panel(player)
+      end
     else
       destroy_panel(player)
+      destroy_loss_summary(player)
     end
   end
+  update_loss_summary(players, tick)
 end

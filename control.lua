@@ -4,6 +4,7 @@ ratings = require("__line-loss__/scripts/ratings")
 require("__line-loss__/scripts/transformers")
 require("__line-loss__/scripts/line-losses")
 require("__line-loss__/scripts/grid-diagram")
+require("__line-loss__/scripts/loss-summary")
 require("__line-loss__/scripts/hover")
 require("__line-loss__/scripts/machine-loads")
 require("__line-loss__/scripts/kirchhoff")
@@ -76,6 +77,7 @@ local function setup()
     end
   end
   scan_transformers()
+  migrate_transformer_losses()
   init_line_losses()  -- after the scan, so every transformer is queued
 end
 
@@ -190,12 +192,16 @@ end)
 
 script.on_event(defines.events.on_gui_location_changed, function(event)
   local element = event.element
-  if element and element.valid then grid_diagram_on_moved(element, event.player_index) end
+  if element and element.valid then
+    grid_diagram_on_moved(element, event.player_index)
+    loss_summary_on_moved(element, event.player_index)
+  end
 end)
 
 -- Worst-routes list: "Show" opens the map at the route
 script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   transformer_panel_on_checked(event)
+  feeders_on_checked(event)
 end)
 
 script.on_event(defines.events.on_gui_click, function(event)

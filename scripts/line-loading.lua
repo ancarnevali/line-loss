@@ -8,7 +8,8 @@
 --   losses: width and colour by the power lost on the wire, relative to the
 --           wire losing most on its surface; diamonds and the power panel from
 --           grid-diagram.lua
--- In any view, hovering a transformer highlights the wires carrying its power
+-- Feeders panel (any view): an arrow above the tracked transformer and an icon
+-- at each of its sources
 -- as the last refresh assigned it (flows on transmission, nearest sources on
 -- distribution), labelled at each source with its share and the line loss. Power
 -- Overload's map colouring is hidden while a view is on. Mixed wires (a
@@ -30,16 +31,11 @@ local MODES = {
   losses = "line-loss-toggle-losses",
   networks = "line-loss-toggle-networks",
 }
--- Networks view: transmission networks blue; on distribution networks, each
--- wire in the colour of the transformer feeding its poles (one colour per
--- transformer), grey where poles fed by different sources meet
-local TRANSMISSION = {r = 0.25, g = 0.55, b = 1, a = 0.9}
-local BOUNDARY = {r = 0.5, g = 0.5, b = 0.5, a = 0.8}
-local SOURCE_PALETTE = {
-  {r = 0.9, g = 0.3, b = 0.2}, {r = 0.2, g = 0.75, b = 0.45}, {r = 0.75, g = 0.35, b = 0.85},
-  {r = 1, g = 0.55, b = 0.1}, {r = 0.1, g = 0.75, b = 0.8}, {r = 0.9, g = 0.4, b = 0.6},
-  {r = 0.55, g = 0.8, b = 0.2}, {r = 0.6, g = 0.45, b = 0.3},
-}
+-- Networks view, drawn like Power Overload's network colouring (lines width 8,
+-- a dot on every pole): transmission networks white, distribution networks blue
+local WHITE = {r = 1, g = 1, b = 1}
+local BLUE = {r = 0.25, g = 0.55, b = 1}
+local NETWORK_WIDTH = 8
 local REFRESH_INTERVAL = 300
 local HOVER_INTERVAL = 10
 local MIN_W = 1000          -- below 1 kW a wire counts as idle
@@ -55,12 +51,15 @@ local function mix(a, b, t)
 end
 
 -- Colour and width of a drawing step
+local function colour_key(c)
+  return string.format("%.3f,%.3f,%.3f", c.r or c[1], c.g or c[2], c.b or c[3])
+end
+
 local function look(mode, step)
   if mode == "networks" then
-    if step == 1 then return TRANSMISSION, 9 end
-    if step == 2 then return BOUNDARY, 4.5 end
-    if step >= 10 then return SOURCE_PALETTE[(step - 10) % #SOURCE_PALETTE + 1], 9 end
-    return IDLE, 2
+    if type(step) ~= "string" then return IDLE, 2 end
+    local r, g, b = step:match("^([%d.]+),([%d.]+),([%d.]+)$")
+    return {r = tonumber(r), g = tonumber(g), b = tonumber(b), a = 0.9}, NETWORK_WIDTH
   end
   if step == 0 then return IDLE, 2 end
   local f = step / STEPS
@@ -213,29 +212,35 @@ local function wire_rating(a, b)
 end
 
 local function clear_mode(view)
-  for _, wire in pairs(view.wires) do
-    if wire.obj and wire.obj.valid then wire.obj.destroy() end
+  for _, set in pairs({view.wires, view.dots or {}, view.labels or {}}) do
+    for _, item in pairs(set) do
+      if item.obj and item.obj.valid then item.obj.destroy() end
+    end
   end
-  view.wires, view.queue, view.queue_pos = {}, nil, nil
+  view.wires, view.dots, view.labels, view.queue, view.queue_pos = {}, nil, nil, nil, nil
 end
 
-local function draw_mode(mode, view, players, loads, wanted, vmax)
+local function draw_mode(mode, view, players, loads, wanted, vmax, tick)
   local players_key = table.concat(players, ",")
   local seen, queue = {}, {}
+  local pole_step = mode == "networks" and {} or nil
+  -- networks view: the colour of a pole (its network's kind)
+  local function pole_colour(unit)
+    local kind = kirchhoff_network_kind(unit)
+    if kind == "transmission" then return WHITE end
+    if kind == "distribution" then return BLUE end
+    return nil
+  end
   for key, wire in pairs(wanted) do
     local entry = loads[key]
     local w = entry and entry.w or 0
     local step = 0
     if mode == "networks" then
-      local kind = kirchhoff_network_kind(wire.a) or kirchhoff_network_kind(wire.b)
-      if kind == "transmission" then
-        step = 1
-      elseif kind == "distribution" then
-        local sa, sb = kirchhoff_pole_source(wire.a), kirchhoff_pole_source(wire.b)
-        local src = (sa == nil and sb) or (sb == nil and sa) or (sa == sb and sa) or nil
-        if sa ~= nil and sb ~= nil and sa ~= sb then step = 2
-        elseif type(src) == "number" then step = 10 + src % #SOURCE_PALETTE end
-      end
+      local ca, cb = pole_colour(wire.a), pole_colour(wire.b)
+      local ka, kb = ca and colour_key(ca), cb and colour_key(cb)
+      if ka then pole_step[wire.a] = ka end
+      if kb then pole_step[wire.b] = kb end
+      step = ka or kb or 0
     elseif w >= MIN_W then
       if mode == "power" then
         if vmax > 0 then step = math.max(1, math.floor(STEPS * w / vmax + 0.5)) end
@@ -267,6 +272,35 @@ local function draw_mode(mode, view, players, loads, wanted, vmax)
       view.wires[key] = nil
     end
   end
+  if mode == "networks" then
+    -- a dot on every pole (not the transformers' hidden poles), like Power Overload
+    view.dots = view.dots or {}
+    local seen_dots = {}
+    local graph = storage.wire_graph or {}
+    for unit, step in pairs(pole_step) do
+      local node = graph[unit]
+      if not (node and node.h) then
+        seen_dots[unit] = true
+        local old = view.dots[unit]
+        if old and old.obj and old.obj.valid then
+          if old.step ~= step then
+            local colour = look(mode, step)
+            colour.a = 0.8
+            old.obj.color, old.step = colour, step
+          end
+          if view.players_key ~= players_key then old.obj.players = players end
+        else
+          queue[#queue + 1] = {dot = unit, step = step}
+        end
+      end
+    end
+    for unit, dot in pairs(view.dots) do
+      if not seen_dots[unit] then
+        if dot.obj and dot.obj.valid then dot.obj.destroy() end
+        view.dots[unit] = nil
+      end
+    end
+  end
   view.queue, view.queue_pos, view.players_key = queue, 1, players_key
 end
 
@@ -277,7 +311,21 @@ local function draw_queued(mode, view, budget)
   while budget > 0 and pos <= #queue do
     local item = queue[pos]
     pos = pos + 1
-    if not view.wires[item.key] then
+    if item.dot then
+      local e = entity_of(item.dot)
+      view.dots = view.dots or {}
+      if e and e.valid and not view.dots[item.dot] then
+        players = players or viewers(mode)
+        if #players == 0 then break end
+        local colour = look(mode, item.step)
+        colour.a = 0.8
+        view.dots[item.dot] = {step = item.step, obj = rendering.draw_circle{
+          color = colour, radius = 0.8, filled = true, target = e, surface = e.surface,
+          players = players, render_mode = "chart",
+        }}
+        budget = budget - 1
+      end
+    elseif not view.wires[item.key] then
       local a, b = entity_of(item.a), entity_of(item.b)
       -- (a transformer's hidden poles are also wired to its parts on Power
       -- Overload's own surface)
@@ -375,7 +423,7 @@ local function redraw(tick)
     wanted[key] = wanted[key] or {a = entry.a, b = entry.b}
   end
   for mode in pairs(MODES) do
-    if #players[mode] > 0 then draw_mode(mode, st.modes[mode], players[mode], loads, wanted, vmax) end
+    if #players[mode] > 0 then draw_mode(mode, st.modes[mode], players[mode], loads, wanted, vmax, tick) end
   end
 end
 
@@ -501,12 +549,9 @@ local function check_overload(st, kind, delay)
   end
 end
 
--- Hovered transformer: the routes from what feeds it, white, wider for a
--- bigger share, labelled at each source with its share and line loss. From
--- feeding transformers along their search trees; for a transformer fed by
--- generators, from the 8 poles with the most generator output nearby.
-local HIGHLIGHT_REFRESH = 300
-local WHITE = {r = 1, g = 1, b = 1, a = 0.9}
+local FEEDER_REFRESH = 300
+local FEEDERS_PANEL = "line-loss-feeders"
+local MAX_GEN_MARKERS = 200
 
 local function clear_highlight(st, index)
   local shown = st.highlight[index]
@@ -517,63 +562,194 @@ local function clear_highlight(st, index)
   st.highlight[index] = nil
 end
 
--- One wire of a feed: width by the share of the transformer's power it carries
-local function draw_wire(objs, player, a, b, share)
-  if a and b and a.valid and b.valid and a.surface == b.surface then
-    objs[#objs + 1] = rendering.draw_line{
-      color = WHITE, width = 3 + 9 * share, from = a, to = b, surface = a.surface,
-      players = {player}, render_mode = "chart",
-    }
-  end
-end
-
-local function draw_label(objs, player, entity, share, loss)
-  if not entity then return end
+-- A map marker: an icon as rich text, the same size on screen at any zoom
+local function marker(objs, player, entity, text, vertical, orientation)
+  if not (entity and entity.valid) then return end
   objs[#objs + 1] = rendering.draw_text{
-    text = {"line-loss-feed.label", string.format("%.0f", 100 * share), string.format("%.1f", 100 * loss)},
-    surface = entity.surface, target = entity, color = WHITE, scale = 4,
-    alignment = "center", vertical_alignment = "bottom", players = {player}, render_mode = "chart",
+    text = text, surface = entity.surface, target = entity, color = {r = 1, g = 1, b = 1},
+    scale = 1.5, scale_with_zoom = true, use_rich_text = true, orientation = orientation or 0,
+    alignment = "center", vertical_alignment = vertical or "middle",
+    players = {player}, render_mode = "chart",
   }
 end
 
+-- The Feeders panel: shown while a map view is on
+local function feeders_panel(player)
+  local frame = player.gui.screen[FEEDERS_PANEL]
+  if frame then return frame end
+  frame = player.gui.screen.add{type = "frame", name = FEEDERS_PANEL, direction = "vertical"}
+  local titlebar = frame.add{type = "flow", direction = "horizontal"}
+  titlebar.drag_target = frame
+  titlebar.add{type = "label", caption = {"line-loss-feeders.title"}, style = "frame_title", ignored_by_interaction = true}
+  local handle = titlebar.add{type = "empty-widget", style = "draggable_space_header", ignored_by_interaction = true}
+  handle.style.horizontally_stretchable = true
+  handle.style.height = 24
+  handle.style.minimal_width = 24
+  frame.add{type = "checkbox", name = "line-loss-feeders-toggle", caption = {"line-loss-feeders.show"},
+    state = (storage.feeders_on or {})[player.index] == true}
+  frame.add{type = "flow", name = "list", direction = "vertical"}
+  frame.location = {x = 0, y = math.floor(player.display_resolution.height * 0.55)}
+  return frame
+end
+
+-- One row: icon and name (or count), and a Show button that opens the map there
+local function feeder_row(list, icon, caption, entity)
+  local row = list.add{type = "flow", direction = "horizontal"}
+  row.style.vertical_align = "center"
+  if entity and entity.valid then
+    local p = entity.position
+    row.add{type = "button", caption = {"line-loss-grid.show"}, style = "mini_button_aligned_to_text_vertically",
+      tags = {line_loss_goto = true, x = p.x, y = p.y, surface = entity.surface.name, ends = {{p.x, p.y}}}}
+  end
+  row.add{type = "label", caption = {"", "[img=entity/" .. icon .. "] ", caption}}
+end
+
+-- The list: the tracked transformer, then what feeds it
+local function feeders_list(player, tracked, feeders)
+  local frame = player.gui.screen[FEEDERS_PANEL]
+  if not (frame and frame.list) then return end
+  local list = frame.list
+  list.clear()
+  if not (tracked and tracked.valid) then
+    if (storage.feeders_on or {})[player.index] then list.add{type = "label", caption = {"line-loss-feeders.pick"}} end
+    return
+  end
+  feeder_row(list, tracked.name, tracked.localised_name, tracked)
+  list.add{type = "label", caption = {"line-loss-feeders.fed-by"}, style = "caption_label"}
+  for _, f in ipairs(feeders) do
+    if f.entity then
+      feeder_row(list, f.entity.name, {"line-loss-feeders.transformer", f.entity.localised_name,
+        string.format("%.0f", 100 * f.share)}, f.entity)
+    else
+      feeder_row(list, f.name, {"line-loss-feeders.generators", prototypes.entity[f.name] and
+        prototypes.entity[f.name].localised_name or f.name, f.count}, f.at)
+    end
+  end
+end
+
+-- Generator poles on a network, found once per network data rebuild
+local function generator_poles(st, net, topo)
+  st.gen_cache = st.gen_cache or {}
+  local cached = st.gen_cache[net]
+  if cached and cached.topo == topo then return cached.poles end
+  local poles = {}
+  for pole, g in pairs(topo and topo.gen_at or {}) do
+    local e = entity_of(pole)
+    if e and e.valid and e.electric_network_id == net then poles[#poles + 1] = {e = e, g = g} end
+  end
+  st.gen_cache[net] = {topo = topo, poles = poles}
+  return poles
+end
+
+-- Feeders: with the panel's box ticked, the transformer hovered or opened
+-- (kept when nothing is) gets an arrow above it, and each of its sources an
+-- icon: feeding transformers, and the poles picking up the generators on its
+-- upstream network (the game spreads production over all of them)
 local function update_highlight(st, player, tick)
   local index = player.index
   local on = false
   for _, shortcut in pairs(MODES) do
     if player.is_shortcut_toggled(shortcut) then on = true end
   end
-  local transformer = on and hovered_transformer(player)
-  local unit = transformer and transformer.unit_number
-  local shown = st.highlight[index]
-  if not unit then
+  if not on then
     clear_highlight(st, index)
+    local frame = player.gui.screen[FEEDERS_PANEL]
+    if frame then frame.destroy() end
     return
   end
-  if shown and shown.unit == unit and tick - shown.tick < HIGHLIGHT_REFRESH then return end
-  clear_highlight(st, index)
-  local parts = storage.transformers[unit]
-  local pin = parts and parts.pole_in
-  if not (pin and pin.valid) then return end
-  -- the wires carrying its power, as the last refresh assigned them (Kirchhoff
-  -- flows on transmission, nearest sources on distribution), labelled at each
-  -- source with its share and the upstream line loss
-  local objs = {}
-  local merged = {}
-  for _, w in ipairs(parts.kirch_feed or {}) do
-    local k = w[1] < w[2] and (w[1] .. ":" .. w[2]) or (w[2] .. ":" .. w[1])
-    merged[k] = merged[k] or {w[1], w[2], 0}
-    merged[k][3] = merged[k][3] + w[3]
+  feeders_panel(player)
+  local shown = st.highlight[index]
+  if not (storage.feeders_on or {})[index] then
+    clear_highlight(st, index)
+    feeders_list(player, nil)
+    return
   end
-  for _, w in pairs(merged) do draw_wire(objs, player, entity_of(w[1]), entity_of(w[2]), math.min(w[3], 1)) end
-  local up = get_upstream_line_loss(unit) or 0
+  local transformer = hovered_transformer(player)
+  if not transformer then
+    local opened = player.opened
+    if opened and player.opened_gui_type == defines.gui_type.entity and opened.valid
+        and TRANSFORMER_NAMES[opened.name] then
+      transformer = opened
+    end
+  end
+  local unit = transformer and transformer.unit_number
+  if not unit and shown and storage.transformers[shown.unit] then unit = shown.unit end
+  local parts = unit and storage.transformers[unit]
+  if not parts then
+    clear_highlight(st, index)
+    feeders_list(player, nil)
+    return
+  end
+  if shown and shown.unit == unit and tick - shown.tick < FEEDER_REFRESH then return end
+  clear_highlight(st, index)
+  local objs, feeders = {}, {}
+  -- the arrow turned upside down; top-aligned so that, turned, it sits above
+  marker(objs, player, parts.transformer, "[img=utility/indication_arrow]", "top", 0.5)
+  local pin = parts.pole_in
+  local net = pin and pin.valid and pin.electric_network_id
+  -- by default feeders sending a negligible share are left out; unticked, every
+  -- transformer feeding the input's network is listed, 0% ones included
+  local setting = player.mod_settings["line-loss-feeders-neglect-low"]
+  local neglect = not setting or setting.value ~= false
+  local listed = {}
   for source, share in pairs(parts.kirch_shares or {}) do
     local feeder = source ~= "gen" and storage.transformers[source]
-    if feeder and share > 0.001 then draw_label(objs, player, feeder.transformer, share, up) end
+    local e = feeder and feeder.transformer
+    if e and e.valid and (share > 0.001 or not neglect) then
+      marker(objs, player, e, "[img=entity/" .. e.name .. "]")
+      feeders[#feeders + 1] = {entity = e, share = share}
+      listed[source] = true
+    end
   end
-  for pole, share in pairs(parts.kirch_gen_src or {}) do
-    if share > 0.001 then draw_label(objs, player, entity_of(pole), share, up) end
+  if not neglect and net then
+    for source, other in pairs(storage.transformers) do
+      local pout, e = other.pole_out, other.transformer
+      if source ~= unit and not listed[source] and pout and pout.valid and pout.electric_network_id == net
+          and e and e.valid then
+        marker(objs, player, e, "[img=entity/" .. e.name .. "]")
+        feeders[#feeders + 1] = {entity = e, share = 0}
+      end
+    end
+  end
+  table.sort(feeders, function(a, b) return a.share > b.share end)
+  local topo = (storage.kirchhoff or {}).topo
+  if net and topo and next(parts.kirch_gen_src or {}) then
+    local by_name, n = {}, 0
+    for _, gp in ipairs(generator_poles(st, net, topo)) do
+      local g = gp.g
+      local name = g.name or (g.w == 0 and g.s > 0 and "solar-panel" or "steam-engine")
+      if not prototypes.entity[name] then name = "steam-engine" end
+      if n < MAX_GEN_MARKERS then
+        marker(objs, player, gp.e, "[img=entity/" .. name .. "]")
+        n = n + 1
+      end
+      for gname, c in pairs(g.count or {[name] = 1}) do
+        local entry = by_name[gname]
+        if not entry then entry = {name = gname, count = 0, best = 0}; by_name[gname] = entry end
+        entry.count = entry.count + c
+        if c > entry.best then entry.best, entry.at = c, gp.e end
+      end
+    end
+    local gens = {}
+    for _, entry in pairs(by_name) do gens[#gens + 1] = entry end
+    table.sort(gens, function(a, b) return a.count > b.count end)
+    for _, entry in ipairs(gens) do feeders[#feeders + 1] = entry end
   end
   st.highlight[index] = {unit = unit, tick = tick, objs = objs}
+  feeders_list(player, parts.transformer, feeders)
+end
+
+-- The panel's box
+---@param event EventData.on_gui_checked_state_changed
+function feeders_on_checked(event)
+  local element = event.element
+  if not (element and element.valid and element.name == "line-loss-feeders-toggle") then return end
+  storage.feeders_on = storage.feeders_on or {}
+  storage.feeders_on[event.player_index] = element.state or nil
+  local player = game.get_player(event.player_index)
+  local st = state()
+  clear_highlight(st, event.player_index)
+  if player then update_highlight(st, player, game.tick) end
 end
 
 ---@param player LuaPlayer
@@ -611,6 +787,22 @@ function update_line_loading(tick)
   if tick % REFRESH_INTERVAL == 37 then redraw(tick) end
   for mode, view in pairs(st.modes) do
     if view.queue then draw_queued(mode, view, DRAWS_PER_TICK) end
+  end
+  -- Power Overload redraws its pole text when the hovered pole changes, in its
+  -- own on_tick, which runs before ours: hidden in the same tick, no flash
+  if active then
+    local sel = st.po_selected or {}
+    st.po_selected = sel
+    local changed = false
+    for _, player in pairs(game.connected_players) do
+      local e = player.selected
+      local unit = e and e.valid and e.type == "electric-pole" and e.unit_number or nil
+      if sel[player.index] ~= unit then
+        sel[player.index] = unit
+        if unit then changed = true end
+      end
+    end
+    if changed then hide_po_hover(st) end
   end
   if tick % HOVER_INTERVAL == 0 then
     update_hover(st)

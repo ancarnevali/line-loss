@@ -1,12 +1,14 @@
 -- Tracks Power Overload's transformers, measures the power each one moves,
 -- and charges the losses through hidden consumers next to each transformer:
---   "Line loss"      on the downstream network: delivered * L / (1 - L),
---                    L = downstream line loss
---   "Transformer losses" on the upstream network: inefficiency
---                    p_in * (1 - e) / e, plus the core loss (a share of the
---                    rating, while switched on)
---   "Line loss"      on the upstream network, when it is fed straight by
---                    generators: drawn * L / (1 - L), L = generator line loss
+--   at the output (downstream network):
+--     "Line loss"          delivered * L / (1 - L), L = downstream line loss
+--     "Transformer losses" inefficiency p_out * (1 - e) / e, plus the core
+--                          loss (a share of the rating, while switched on)
+--   at the input (upstream network), only when it is fed straight by
+--   generators:
+--     "Line loss"          drawn * L / (1 - L), L = generator line loss
+-- Power Overload's interfaces carry the power on the wires plus the
+-- transformer losses, so the upstream network pays for all of them.
 --
 -- Power Overload keeps its transformer data private, so this mod finds the
 -- transformer's hidden parts itself:
@@ -32,7 +34,7 @@
 ---@field pole_out LuaEntity?  Power Overload's hidden output pole
 ---@field interface_out LuaEntity?  Power Overload's hidden output interface
 ---@field line_eei LuaEntity?   "Line loss" consumer (downstream network)
----@field ineff_eei LuaEntity?  "Transformer losses" consumer (upstream network)
+---@field ineff_eei LuaEntity?  "Transformer losses" consumer (downstream network)
 ---@field line_in_eei LuaEntity?  "Line loss" consumer on the upstream network, when it is a generator network
 ---@field kirch_line_loss number?  downstream line loss (kirchhoff.lua)
 ---@field kirch_up_loss number?  upstream line loss, fed by transformers (kirchhoff.lua)
@@ -41,7 +43,7 @@
 ---@field p_out number   power given to the downstream network, including the line loss (W)
 ---@field p_deliv number power that reaches consumers after the line loss (W)
 ---@field p_in number    power Power Overload's input interface takes (W)
----@field p_draw number  total power drawn from the upstream network: p_in + inefficiency + core loss (W)
+---@field p_draw number  total power drawn from the upstream network: p_out + inefficiency + core loss (W)
 ---@field line_burn number
 ---@field ineff_burn number
 ---@field rating number?  rated power: the weaker side's strongest pole (W)
@@ -373,8 +375,20 @@ local function refresh_parts(parts)
     parts.interface_out = find_at(hidden_surface, OUTPUT_INTERFACES, parts.position_out)
   end
   ensure_consumer(parts, "line_eei", LINE_EEI, hidden_surface, parts.position_out)
-  ensure_consumer(parts, "ineff_eei", INEFF_EEI, hidden_surface, parts.position_in)
+  ensure_consumer(parts, "ineff_eei", INEFF_EEI, hidden_surface, parts.position_out)
   set_generator_consumer(parts, parts.gen_fed == true)
+end
+
+-- Saves from before 0.2.2 had the "Transformer losses" consumer at the input:
+-- removed here, re-created at the output by the next refresh
+function migrate_transformer_losses()
+  for _, parts in pairs(storage.transformers or {}) do
+    local e, pos = parts.ineff_eei, parts.position_out
+    if e and e.valid and pos and (e.position.x ~= pos.x or e.position.y ~= pos.y) then
+      e.destroy()
+      parts.ineff_eei = nil
+    end
+  end
 end
 
 local function complete(parts)
@@ -486,11 +500,11 @@ function update_transformers(tick)
         local sample = produced * share
         if not (sample == sample and sample >= 0 and sample < math.huge) then sample = 0 end
         local parts = item.parts
-        -- The sample includes what our line-loss consumer drew (the loss set
-        -- last time), so smooth the useful part only: the loss is then
+        -- The sample includes what our consumers at the output drew (the
+        -- losses set last time), so smooth the useful part only: the loss is then
         -- recomputed from it exactly, instead of feeding back on itself
         -- (which would settle slowly at high losses)
-        local useful = sample - parts.line_burn
+        local useful = sample - parts.line_burn - (parts.ineff_burn or 0) - (parts.no_load_burn or 0)
         if useful < 0 then useful = 0 end
         parts.p_deliv = parts.p_deliv + SMOOTHING * (useful - parts.p_deliv)
         parts.sampled = true
@@ -515,13 +529,14 @@ function update_transformers(tick)
     local loss = 1 - get_line_factor(parts)
     parts.line_burn = parts.p_deliv * loss / (1 - loss)
     parts.p_out = parts.p_deliv + parts.line_burn
-    parts.p_in = parts.p_out / po_efficiency
-    parts.ineff_burn = ineff_active and parts.p_in * (1 - efficiency) / efficiency or 0
+    parts.ineff_burn = ineff_active and parts.p_out * (1 - efficiency) / efficiency or 0
     -- Core loss: constant while switched on, drawn with the inefficiency
     local entity = parts.transformer
     local on = entity and entity.valid and entity.power_switch_state
     parts.no_load_burn = on and (parts.rating or 0) * settings_.no_load or 0
-    parts.p_draw = parts.p_in + parts.ineff_burn + parts.no_load_burn
+    -- Both at the output: Power Overload's interfaces carry them
+    parts.p_in = (parts.p_out + parts.ineff_burn + parts.no_load_burn) / po_efficiency
+    parts.p_draw = parts.p_in
     -- Fed straight by generators: the wires between them and this
     -- transformer lose gen_loss of what the generators send, so
     -- gen_burn = draw * loss / (1 - loss)

@@ -53,7 +53,6 @@ local REBUILD_EVERY = 3600    -- also rebuilt on wire changes
 local WORK = 2000             -- units per tick
 local CG_MAX = 300
 local CG_TOL = 1e-6
-local NEAREST_ENTRIES = 3     -- edges from a terminal inside a block
 local MIN_COST = 0.01
 
 local function kstate()
@@ -150,7 +149,7 @@ function topo_stages.gens(job, budget)
     used = used + 1
     if cls[unit] and cls[unit] ~= "H" and nd and (nd.reach or 0) > 0 and nd.e and nd.e.valid then
       used = used + 39         -- an area search: at most about 50 a tick
-      local w, sol, surface = 0, 0, nil
+      local w, sol, surface, name, top, count = 0, 0, nil, nil, -1, {}
       for _, g in pairs(line_loss_search.generators_near(nd.e, nd.reach)) do
         local id = g.unit_number
         if id and not t.gen_seen[id] then
@@ -158,9 +157,11 @@ function topo_stages.gens(job, budget)
           local rated = line_loss_search.rated_output(g)
           if g.type == "solar-panel" then sol = sol + rated else w = w + rated end
           surface = g.surface.index
+          if rated > top then name, top = g.name, rated end   -- its biggest generator (map icon)
+          count[g.name] = (count[g.name] or 0) + 1           -- generators by type (Feeders panel)
         end
       end
-      if w + sol > 0 then t.gen_at[unit] = {w = w, s = sol, surface = surface} end
+      if w + sol > 0 then t.gen_at[unit] = {w = w, s = sol, surface = surface, name = name, count = count} end
     end
   end
   if t.i > n then t.i, t.gen_seen, t.comp_of, t.comps = 1, nil, {}, {} return used, "networks" end
@@ -243,7 +244,9 @@ function topo_stages.direct(job, budget)
     t.i = t.i + 1
     local c = cls[unit]
     if c == "T" or c == "H" then
-      local adj = node(unit).adj
+      -- (a pole removed while the rebuild runs has no node any more)
+      local nd = node(unit)
+      local adj = nd and nd.adj or {}
       used = used + math.floor(#adj / 3) + 1
       for x = 1, #adj, 3 do
         local other = adj[x]
@@ -932,7 +935,6 @@ function solve_stages.hand(job)
     parts.kirch_tick = tick
   end
   st.wire_loads, st.tick = s.wire_loads, tick
-  st.pole_src = s.pole_src or {}
   job.s = nil
   return 10, nil
 end
@@ -1015,17 +1017,6 @@ function kirchhoff_network_transmission_count(unit)
   local id = topo and topo.comp_of and topo.comp_of[unit]
   local c = id and topo.comps[id]
   return c and c.transmission or 0
-end
-
--- The source feeding a distribution pole (networks view): its transformer's
--- unit, or "gen" for generators; nil off distribution networks
-function kirchhoff_pole_source(unit)
-  local st = storage.kirchhoff
-  local src = st and st.pole_src and st.pole_src[unit]
-  if src == nil then return nil end
-  if type(src) == "string" then return "gen" end
-  local info = st.topo and st.topo.terminal[src]
-  return info and info.unit or nil
 end
 
 -- Helpers shared with scripts/distribution.lua

@@ -1,4 +1,24 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.2.2
+Date: 2026-11-16
+  Changes:
+    - Networks view: transmission networks white, distribution networks blue.
+    - Feeders panel: new player setting to also list feeders sending negligible power.
+    - "Transformer losses" moved to the transformer output (downstream network).
+    - Line losses view: new Total power loss panel (generated, delivered, every loss).
+    - Power Overload's pole hover text no longer flashes.
+    - Huge electric pole rating locked at 1 GW. Huge lines carrying more will overload.
+  Bugfixes:
+    - Fixed a crash when a pole was removed while the network data was being rebuilt.
+---------------------------------------------------------------------------------------------------
+Version: 0.2.1
+Date: 2026-11-14
+  Features:
+    - Feeders panel (with any map view on): tick "Show feeders" to mark on the map what feeds the transformer hovered or opened, and list its feeding transformers and generators, each with a Show button.
+  Changes:
+    - Feeders panel replaces the highlighted feeding wires when hovering a transformer.
+    - Network panel hidden for now.
+---------------------------------------------------------------------------------------------------
 Version: 0.2.0
 Date: 2026-11-13
   Features:

@@ -85,4 +85,11 @@ data:extend{
     default_value = false,
     order = "za"
   },
+  {
+    type = "bool-setting",
+    name = "line-loss-feeders-neglect-low",
+    setting_type = "runtime-per-user",
+    default_value = true,
+    order = "zc"
+  },
 }

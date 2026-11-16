@@ -124,8 +124,7 @@ A: - Keep wires lightly loaded: the share a wire loses grows with the power it c
    - Keep routes short, and step up close to the generators.
    - Keep distribution poles out: a single medium pole wired into a transmission line turns the
      whole network into distribution.
-   - Use the "Line losses" view and the network panel's list of the wires losing the most power to
-     find the best upgrades.
+   - Use the "Line losses" view to find the wires losing the most power.
 
 Q: How can I lower line loss in a distribution network?
 A: - Put the transformer in the middle of the load: a 9 x 9 block of medium poles 7 tiles apart,
@@ -146,13 +145,11 @@ A: Four shortcuts, one view at a time, all drawn on the map:
      Line loading (% of rating): power on each wire against its weaker pole's rating, yellow
        above 60%, red above 80%.
      Line losses: power lost on each wire, green to red across all wires on the surface.
-       Diamonds show each transformer's total upstream loss. Opens the network panel: the network
-       downstream of the transformer you hover or open, its sources, its consumption and the wires
-       losing the most power, each with a Show button.
+       Diamonds show each transformer's total upstream loss.
      Networks: transmission networks in blue; in distribution networks, each wire in the colour
        of the transformer feeding it, grey where several sources meet.
-   In any view, hovering a transformer shows what feeds it, with each source's share and line
-   loss. Wires straight from a transmission pole to a distribution pole are dashed.
+   With any view on, the Feeders panel marks what feeds a transformer: tick "Show feeders" and
+   hover or open it. Wires straight from a transmission pole to a distribution pole are dashed.
 
 Q: What is not modelled?
 A: - Inside a distribution network, power from a source follows its shortest path; loops do not
