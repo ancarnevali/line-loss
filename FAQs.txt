@@ -1,7 +1,7 @@
 Line loss - Frequently asked questions
 =======================================
 
-Q: How and why are we separating transmission and distribution networks?
+# How and why are we separating transmission and distribution networks?
 A: Why: the goal of this mod is to add grid management inspired decision making to Factorio.
    Optimising production is fun, but the vanilla way of dealing with the power network breaks my
    immersion. I think there is a small niche of players that feel the same!
@@ -28,8 +28,7 @@ A: Why: the goal of this mod is to add grid management inspired decision making 
    generator is a distribution network, and its transmission poles count as distribution poles.
    Opening the electricity overview shows which kind its network is.
 
-Q: What is a Kirchhoff solve? Is it more realistic than vanilla, and how can its realism be pushed
-   further?
+# What is a Kirchhoff solve? Is it more realistic than vanilla, and how can its realism be pushed further?
 A: A Kirchhoff solve is a DC power flow: power plays the current, and each wire's
    resistance-weighted length plays its resistance. Power entering and leaving the network
    (transformer outputs and inputs, machine loads) sets up a linear system whose solution gives
@@ -44,7 +43,7 @@ A: A Kirchhoff solve is a DC power flow: power plays the current, and each wire'
    costs much more script time, Factorio has no voltages or reactive power to show for it, and
    the gameplay would barely change.
 
-Q: How exactly does the distribution network work?
+# How exactly does the distribution network work?
 A: Sources are the transformers feeding the network and the poles that pick up generators.
    A tree search (shortest paths from every source at once, by resistance-weighted distance along
    copper wires) finds each pole's nearest sources. Each pole's load then goes whole to its
@@ -66,7 +65,7 @@ A: Sources are the transformers feeding the network and the poles that pick up g
        along its shortest path, so power hungry machines far from transformers cost more, idle
        ones almost nothing. Costs an entity search per pole when the network changes.
 
-Q: How are losses worked out?
+# How are losses worked out?
 A: T = transformer. Each "->" line is the hidden consumer that draws that loss, and the network it
    draws from.
 
@@ -79,7 +78,7 @@ A: T = transformer. Each "->" line is the hidden consumer that draws that loss, 
         v
    T gen
         |    inefficiency + core loss
-        |    -> T gen's "Transformer losses", on the generator network
+        |    -> T gen's "Transformer losses", on the transmission network
         v
    Transmission network
         |    line loss, grows with power; power spreads over the whole
@@ -88,7 +87,7 @@ A: T = transformer. Each "->" line is the hidden consumer that draws that loss, 
         v
    T distr
         |    inefficiency + core loss
-        |    -> T distr's "Transformer losses", on the transmission network
+        |    -> T distr's "Transformer losses", on the distribution network
         v
    Distribution network
         |    line loss, per tile x distance to each pole's nearest source
@@ -96,12 +95,12 @@ A: T = transformer. Each "->" line is the hidden consumer that draws that loss, 
         v
    Machines
 
-Q: What resistance are we assigning to each pole?
+# What resistance are we assigning to each pole?
 A: Each pole has a resistance per tile of wire, from its Power Overload rating:
      r = sqrt(300 MW / pole rating)
-   With Power Overload's default ratings:
+   With Power Overload's default ratings (the huge pole is locked at 1 GW by Line loss):
      Pole                        Rating    Resistance
-     Huge electric pole          3 GW      0.32
+     Huge electric pole          1 GW      0.55
      Big electric pole           300 MW    1
      Substation                  125 MW    1.55
      Compact substation          125 MW    1.55
@@ -111,7 +110,7 @@ A: Each pole has a resistance per tile of wire, from its Power Overload rating:
    rating. A wire between poles A and B costs length x (r_A + r_B) / 2. Each pole's tooltip
    shows its "Line resistance".
 
-Q: How can I lower line loss in a transmission network?
+# How can I lower line loss in a transmission network?
 A: - Keep wires lightly loaded: the share a wire loses grows with the power it carries. 100 tiles
      of big poles lose 0.55% at 10 MW, 2.5% at 75 MW and 9.25% at 300 MW. The "Line loading
      (% of rating)" view shows yellow above 60% and red above 80%.
@@ -119,14 +118,14 @@ A: - Keep wires lightly loaded: the share a wire loses grows with the power it c
      of what one line carrying it all would.
    - Bypass bottlenecks: in one test layout, a bypass around a single busy line cut the feeding
      transformer's loss from 9.4% to 6.9%.
-   - Use huge poles for bulk power: a third of a big pole's resistance and ten times its rating.
-     100 tiles of huge poles lose 0.36% at 300 MW.
+   - Use huge poles for bulk power: about half a big pole's resistance and over three times its
+     rating. 100 tiles of huge poles lose 1.6% at 300 MW and 5.1% at 1 GW.
    - Keep routes short, and step up close to the generators.
    - Keep distribution poles out: a single medium pole wired into a transmission line turns the
      whole network into distribution.
    - Use the "Line losses" view to find the wires losing the most power.
 
-Q: How can I lower line loss in a distribution network?
+# How can I lower line loss in a distribution network?
 A: - Put the transformer in the middle of the load: a 9 x 9 block of medium poles 7 tiles apart,
      40.5 MW of machines, loses 3.3% fed at a corner and 1.9% fed at the centre.
    - Feed large networks from several sides: the same block fed from two opposite corners loses
@@ -137,21 +136,23 @@ A: - Put the transformer in the middle of the load: a 9 x 9 block of medium pole
      distribution lines. Every extra transformer costs inefficiency and core loss, though.
    - Put local generation (e.g. solar) next to hungry machines far from the transformers.
    - With machine weighting on, keep power hungry machines close to the transformers.
-   - Use the "Networks" view to see which transformer feeds each wire.
+   - Use the "Line losses" view to find the wires losing the most power.
 
-Q: Are there new map modes to visualise the Line loss model?
+# Are there new map modes to visualise the Line loss model?
 A: Four shortcuts, one view at a time, all drawn on the map:
      Line loading: power on each wire, green to red up to the busiest.
      Line loading (% of rating): power on each wire against its weaker pole's rating, yellow
        above 60%, red above 80%.
      Line losses: power lost on each wire, green to red across all wires on the surface.
-       Diamonds show each transformer's total upstream loss.
-     Networks: transmission networks in blue; in distribution networks, each wire in the colour
-       of the transformer feeding it, grey where several sources meet.
-   With any view on, the Feeders panel marks what feeds a transformer: tick "Show feeders" and
-   hover or open it. Wires straight from a transmission pole to a distribution pole are dashed.
+       Diamonds show each transformer's total upstream loss. Opens the Total power loss panel:
+       power generated on the surface, delivered to machines, and every loss.
+     Networks: transmission networks in white; in distribution networks, each pole in the colour
+       of the transformer feeding it. Tick "Network types" for distribution networks in blue.
+   With any view on, the Line loss options panel can mark what feeds a transformer: tick "Show
+   feeders" and hover or open it. Wires straight from a transmission pole to a distribution pole
+   are dashed.
 
-Q: What is not modelled?
+# What is not modelled?
 A: - Inside a distribution network, power from a source follows its shortest path; loops do not
      share the load.
    - Machines are not placed exactly: with machine weighting off their load is spread evenly over
@@ -162,11 +163,11 @@ A: - Inside a distribution network, power from a source follows its shortest pat
    - Voltages, reactive power and voltage drop (see the Kirchhoff question).
    - Power Overload's high- and low-priority transformers are hidden.
 
-Q: What is core loss?
+# What is core loss?
 A: A constant loss of a switched-on transformer, whatever it carries, as in a real transformer,
    whose core uses energy even with no load. It is 0.1% (map setting "Transformer core loss") of
    the transformer's rating, which is the rating of the strongest pole on its weaker side. It is
-   drawn with the inefficiency by the transformer's "Transformer losses" consumer, on its upstream
-   network. An oversized or idle transformer wastes power this way: size transformers to their
-   load, and switch off the ones you don't need. A future version will add circuit network
-   support, to help turn off inactive transformers automatically.
+   drawn with the inefficiency by the transformer's "Transformer losses" consumer, at its output,
+   on the network it feeds. An oversized or idle transformer wastes power this way: size
+   transformers to their load, and switch off the ones you don't need. A future version will add
+   circuit network support, to help turn off inactive transformers automatically.

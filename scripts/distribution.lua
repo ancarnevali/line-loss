@@ -165,7 +165,17 @@ function distribution_assign(job, budget)
   end
   for _, pin in ipairs(pin_list) do sinks[#sinks + 1] = best_pin[pin] end
   local used = #b.members + #sinks
-  if #sinks == 0 then return used end
+  s.pole_src = s.pole_src or {}
+  if #sinks == 0 then
+    for _, u in ipairs(b.members) do
+      local best, best_d
+      for src, l in pairs(labels[u]) do
+        if src ~= "n" and (not best_d or l[1] < best_d) then best, best_d = src, l[1] end
+      end
+      s.pole_src[u] = best
+    end
+    return used
+  end
   local rem, taken = {}, {}
   for i, sk in ipairs(sinks) do rem[i], taken[i] = sk.w, {} end
   -- Give load i what source src can take at distance d: a transformer output
@@ -314,6 +324,20 @@ function distribution_assign(job, budget)
         if type(src) == "string" then gen_src[tonumber(src:sub(2))] = f end
       end
       res.feed, res.gen_src = feed, gen_src
+    end
+  end
+  -- source of every pole (networks view): its load's, else its nearest
+  local pole_src = s.pole_src
+  for _, u in ipairs(b.members) do
+    local best, best_d
+    for src, l in pairs(labels[u]) do
+      if src ~= "n" and (not best_d or l[1] < best_d) then best, best_d = src, l[1] end
+    end
+    pole_src[u] = best
+  end
+  for i, sk in ipairs(sinks) do
+    if not sk.pin then
+      for src in pairs(taken[i]) do pole_src[sk.pole] = src end
     end
   end
   local settled = b.settled

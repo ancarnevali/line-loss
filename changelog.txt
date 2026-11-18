@@ -1,4 +1,11 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.2.3
+Date: 2026-11-18
+  Changes:
+    - Networks view: distribution networks in the colour of the transformer feeding each pole.
+    - Networks view: "Network types" checkbox for the white and blue view.
+    - FAQ updated for 0.2.2.
+---------------------------------------------------------------------------------------------------
 Version: 0.2.2
 Date: 2026-11-16
   Changes:

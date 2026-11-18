@@ -935,6 +935,7 @@ function solve_stages.hand(job)
     parts.kirch_tick = tick
   end
   st.wire_loads, st.tick = s.wire_loads, tick
+  st.pole_src = s.pole_src or {}
   job.s = nil
   return 10, nil
 end
@@ -1017,6 +1018,17 @@ function kirchhoff_network_transmission_count(unit)
   local id = topo and topo.comp_of and topo.comp_of[unit]
   local c = id and topo.comps[id]
   return c and c.transmission or 0
+end
+
+-- The source feeding a distribution pole (networks view): its transformer's
+-- unit, or "gen" for generators; nil off distribution networks
+function kirchhoff_pole_source(unit)
+  local st = storage.kirchhoff
+  local src = st and st.pole_src and st.pole_src[unit]
+  if src == nil then return nil end
+  if type(src) == "string" then return "gen" end
+  local info = st.topo and st.topo.terminal[src]
+  return info and info.unit or nil
 end
 
 -- Helpers shared with scripts/distribution.lua

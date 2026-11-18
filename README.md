@@ -44,9 +44,12 @@ Details and worked examples are in **FAQs.txt**.
   panel: power generated on the surface, delivered to machines, and every loss (line loss on
   transmission, distribution and generation networks, inefficiency, core loss), each as % of
   generated.
-* **Networks** (map view): transmission networks in white, distribution networks in blue.
-* **Feeders panel**: for a transformer, the transformers feeding it (with their share) and its
-  generators are marked on the map and listed, each with a **Show** button.
+* **Networks** (map view): transmission networks in white; in distribution networks, each pole in
+  the colour of the transformer feeding it. Tick "Network types" in the Line loss options panel
+  for distribution networks in blue.
+* **Show feeders** (Line loss options panel, with any view on): for a transformer, the
+  transformers feeding it (with their share) and its generators are marked on the map and listed,
+  each with a **Show** button.
 * Power Overload's network colouring and pole text are hidden while a view is on.
 
 All four shortcuts can be bound to keys.

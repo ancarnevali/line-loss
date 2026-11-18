@@ -32,9 +32,21 @@ local MODES = {
   networks = "line-loss-toggle-networks",
 }
 -- Networks view, drawn like Power Overload's network colouring (lines width 8,
--- a dot on every pole): transmission networks white, distribution networks blue
+-- a dot on every pole): transmission networks white; in distribution networks
+-- each pole in the colour of the transformer feeding it, Power Overload's
+-- default colour for that transformer (its palette by unit number).
+-- With the panel's "Network types" box ticked the player sees the "types"
+-- drawing instead: transmission networks white, distribution networks blue.
 local WHITE = {r = 1, g = 1, b = 1}
 local BLUE = {r = 0.25, g = 0.55, b = 1}
+-- drawings: one per shortcut, plus "types", drawn for the networks view
+local DRAWINGS = {"power", "rated", "losses", "networks", "types"}
+local function transformer_colour(unit)
+  local palette = shared and shared.network_color_palette
+  if not palette or #palette == 0 then return nil end
+  local entry = palette[(unit % #palette) + 1]
+  return {r = entry.r, g = entry.g, b = entry.b}
+end
 local NETWORK_WIDTH = 8
 local REFRESH_INTERVAL = 300
 local HOVER_INTERVAL = 10
@@ -56,7 +68,7 @@ local function colour_key(c)
 end
 
 local function look(mode, step)
-  if mode == "networks" then
+  if mode == "networks" or mode == "types" then
     if type(step) ~= "string" then return IDLE, 2 end
     local r, g, b = step:match("^([%d.]+),([%d.]+),([%d.]+)$")
     return {r = tonumber(r), g = tonumber(g), b = tonumber(b), a = 0.9}, NETWORK_WIDTH
@@ -85,15 +97,22 @@ local function state()
     st = {modes = {}, pole_load = {}, hover = {}}
     storage.line_loading = st
   end
-  for mode in pairs(MODES) do st.modes[mode] = st.modes[mode] or {wires = {}} end
+  for _, mode in ipairs(DRAWINGS) do st.modes[mode] = st.modes[mode] or {wires = {}} end
   st.highlight = st.highlight or {}
   return st
 end
 
 local function viewers(mode)
   local list = {}
+  local types = storage.network_types_on or {}
   for _, player in pairs(game.connected_players) do
-    if player.is_shortcut_toggled(MODES[mode]) then list[#list + 1] = player.index end
+    if mode == "networks" or mode == "types" then
+      if player.is_shortcut_toggled(MODES.networks) and (types[player.index] == true) == (mode == "types") then
+        list[#list + 1] = player.index
+      end
+    elseif player.is_shortcut_toggled(MODES[mode]) then
+      list[#list + 1] = player.index
+    end
   end
   return list
 end
@@ -223,19 +242,24 @@ end
 local function draw_mode(mode, view, players, loads, wanted, vmax, tick)
   local players_key = table.concat(players, ",")
   local seen, queue = {}, {}
-  local pole_step = mode == "networks" and {} or nil
-  -- networks view: the colour of a pole (its network's kind)
+  local networks = mode == "networks" or mode == "types"
+  local pole_step = networks and {} or nil
+  -- networks view: the colour of a pole; poles fed by generators are not drawn
   local function pole_colour(unit)
     local kind = kirchhoff_network_kind(unit)
     if kind == "transmission" then return WHITE end
-    if kind == "distribution" then return BLUE end
+    if kind == "distribution" then
+      if mode == "types" then return BLUE end
+      local source = kirchhoff_pole_source(unit)
+      if type(source) == "number" then return transformer_colour(source) end
+    end
     return nil
   end
   for key, wire in pairs(wanted) do
     local entry = loads[key]
     local w = entry and entry.w or 0
     local step = 0
-    if mode == "networks" then
+    if networks then
       local ca, cb = pole_colour(wire.a), pole_colour(wire.b)
       local ka, kb = ca and colour_key(ca), cb and colour_key(cb)
       if ka then pole_step[wire.a] = ka end
@@ -272,7 +296,7 @@ local function draw_mode(mode, view, players, loads, wanted, vmax, tick)
       view.wires[key] = nil
     end
   end
-  if mode == "networks" then
+  if networks then
     -- a dot on every pole (not the transformers' hidden poles), like Power Overload
     view.dots = view.dots or {}
     local seen_dots = {}
@@ -381,7 +405,7 @@ local function redraw(tick)
   local st = state()
   local any = false
   local players = {}
-  for mode in pairs(MODES) do
+  for _, mode in ipairs(DRAWINGS) do
     players[mode] = viewers(mode)
     if #players[mode] > 0 then any = true else clear_mode(st.modes[mode]) end
   end
@@ -422,7 +446,7 @@ local function redraw(tick)
     -- wires through hidden poles (a transformer's own output or input) too
     wanted[key] = wanted[key] or {a = entry.a, b = entry.b}
   end
-  for mode in pairs(MODES) do
+  for _, mode in ipairs(DRAWINGS) do
     if #players[mode] > 0 then draw_mode(mode, st.modes[mode], players[mode], loads, wanted, vmax, tick) end
   end
 end
@@ -585,6 +609,9 @@ local function feeders_panel(player)
   handle.style.horizontally_stretchable = true
   handle.style.height = 24
   handle.style.minimal_width = 24
+  frame.add{type = "checkbox", name = "line-loss-network-types", caption = {"line-loss-feeders.types"},
+    tooltip = {"line-loss-feeders.types-tooltip"}, state = (storage.network_types_on or {})[player.index] == true,
+    visible = player.is_shortcut_toggled(MODES.networks)}
   frame.add{type = "checkbox", name = "line-loss-feeders-toggle", caption = {"line-loss-feeders.show"},
     state = (storage.feeders_on or {})[player.index] == true}
   frame.add{type = "flow", name = "list", direction = "vertical"}
@@ -657,7 +684,16 @@ local function update_highlight(st, player, tick)
     if frame then frame.destroy() end
     return
   end
-  feeders_panel(player)
+  local panel = feeders_panel(player)
+  local types_box = panel["line-loss-network-types"]
+  if not types_box then
+    -- a panel left open by an older version
+    panel.destroy()
+    panel = feeders_panel(player)
+    types_box = panel["line-loss-network-types"]
+  end
+  local networks_on = player.is_shortcut_toggled(MODES.networks)
+  if types_box and types_box.visible ~= networks_on then types_box.visible = networks_on end
   local shown = st.highlight[index]
   if not (storage.feeders_on or {})[index] then
     clear_highlight(st, index)
@@ -743,7 +779,18 @@ end
 ---@param event EventData.on_gui_checked_state_changed
 function feeders_on_checked(event)
   local element = event.element
-  if not (element and element.valid and element.name == "line-loss-feeders-toggle") then return end
+  if not (element and element.valid) then return end
+  if element.name == "line-loss-network-types" then
+    storage.network_types_on = storage.network_types_on or {}
+    storage.network_types_on[event.player_index] = element.state or nil
+    local st = state()
+    redraw(game.tick)
+    for m, view in pairs(st.modes) do
+      if view.queue then draw_queued(m, view, DRAWS_PER_TICK) end
+    end
+    return
+  end
+  if element.name ~= "line-loss-feeders-toggle" then return end
   storage.feeders_on = storage.feeders_on or {}
   storage.feeders_on[event.player_index] = element.state or nil
   local player = game.get_player(event.player_index)
